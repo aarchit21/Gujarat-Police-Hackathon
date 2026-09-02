@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gujarat CCTV Hybrid P0</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Gujarat CCTV Hybrid P0</h1>
+      <div class="meta">Customised Model 5 · Model 1 registry+GIS always on · Model 2 first feed-to-alert · no central VMS</div>
+    </div>
+    <div class="meta" id="hostMeta">loading host…</div>
+  </header>
+  <div class="banner" id="coverageBanner">Coverage loading…</div>
+  <div class="stats" id="statsBar"></div>
+  <div class="layout">
+    <div class="map-wrap">
+      <div id="map"></div>
+      <div id="previewBox" class="preview hidden">
+        <div class="row">
+          <b id="previewTitle">Preview</b>
+          <button class="secondary" id="btnClosePreview">Close preview</button>
+        </div>
+        <video id="previewVideo" controls></video>
+        <p class="muted" id="previewNote">Browser preview is not proof that analytics is active.</p>
+      </div>
+    </div>
+    <aside>
+      <div class="row">
+        <button id="btnAnalyze">Run own-feed analysis</button>
+        <button class="secondary" id="btnRefresh">Refresh</button>
+        <button class="secondary" id="btnSync">Sync catalogue</button>
+      </div>
+      <p class="legend">Own-feed cameras are separate from the government catalogue. Catalogue count is whatever cameras.json returns — not a hardcoded 50. Map lines are inferred, not proven roads. SQLite is a local fallback — PostgreSQL/PostGIS is the production target.</p>
+
+      <div class="tabs">
+        <button class="tab on" data-tab="alerts">Alerts</button>
+        <button class="tab" data-tab="ledger">Ledger</button>
+        <button class="tab" data-tab="workers">Workers</button>
+        <button class="tab" data-tab="cost">Cost</button>
+        <button class="tab" data-tab="reports">Reports</button>
+      </div>
+
+      <section data-panel="alerts">
+        <h2>Find designated plate</h2>
+        <div class="row">
+          <input id="plateQuery" value="GJ01AB1234" />
+          <button class="secondary" id="btnSearch">Show history</button>
+        </div>
+        <div id="history"></div>
+        <h2>Alerts (from database only)</h2>
+        <div id="alerts"></div>
+      </section>
+
+      <section data-panel="ledger" class="hidden">
+        <h2>Camera ledger</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>Origin</th><th>Pri</th><th>Mode</th><th>Status</th>
+                <th>Cat live</th><th>Decode</th><th>Proto</th><th>Analytics</th>
+              </tr>
+            </thead>
+            <tbody id="ledger"></tbody>
+          </table>
+        </div>
+        <div id="cameraDetail"></div>
+      </section>
+
+      <section data-panel="workers" class="hidden">
+        <h2>Worker manager</h2>
+        <div id="workerPanel" class="card muted">No worker snapshot yet.</div>
+        <div class="row">
+          <input id="workerCam" placeholder="Camera ID" />
+          <button id="btnStartWorker">Start</button>
+          <button class="secondary" id="btnStopWorker">Stop</button>
+          <button class="secondary" id="btnStopAll">Stop all</button>
+        </div>
+      </section>
+
+      <section data-panel="cost" class="hidden">
+        <h2>Capacity / cost estimator</h2>
+        <p class="legend">Every result is an estimate, not a measured production result. No savings percentage is claimed.</p>
+        <div class="grid-form">
+          <label>Cameras <input id="c_count" type="number" value="50" /></label>
+          <label>Avg bitrate kbps <input id="c_br" type="number" value="1500" /></label>
+          <label>Target analysis FPS <input id="c_fps" type="number" value="2" step="0.1" /></label>
+          <label>Active cameras <input id="c_active" type="number" value="2" /></label>
+          <label>Measured worker FPS <input id="c_wfps" type="number" value="0" step="0.1" /></label>
+          <label>GPU hourly cost <input id="c_gpu" type="number" value="0" step="0.01" /></label>
+          <label>Storage cost / GB <input id="c_sto" type="number" value="0" step="0.01" /></label>
+          <label>Evidence events / day <input id="c_ev" type="number" value="100" /></label>
+        </div>
+        <button id="btnCost">Calculate estimate</button>
+        <pre id="costOut" class="card"></pre>
+      </section>
+
+      <section data-panel="reports" class="hidden">
+        <h2>Downloadable reports</h2>
+        <div class="row">
+          <a class="button" id="dlJson" href="#">Sightings JSON</a>
+          <a class="button secondary" id="dlCsv" href="#">Sightings CSV</a>
+        </div>
+        <p class="muted">Reports include plate, OCR, camera, department, timestamps, confidence, model id/hash, run id, evidence, and alert status.</p>
+      </section>
+    </aside>
+  </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
