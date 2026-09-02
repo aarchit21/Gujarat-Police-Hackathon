@@ -34,6 +34,8 @@ CAMERA_COLUMNS = {
     "last_pts_ms": ("DOUBLE PRECISION", "REAL"),
     "reconnect_count": ("INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
     "active_protocol": ("VARCHAR(16) DEFAULT ''", "VARCHAR(16) DEFAULT ''"),
+    "measured_worker_fps": ("DOUBLE PRECISION", "REAL"),
+    "measured_at": ("TIMESTAMPTZ", "DATETIME"),
 }
 
 SIGHTING_COLUMNS = {

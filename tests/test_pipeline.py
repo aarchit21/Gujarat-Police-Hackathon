@@ -108,6 +108,7 @@ def test_camera_coverage_counts(db):
     assert cov["blocked_count"] == 2
     assert cov["open_capture_count"] == 1
     assert cov["queued_count"] == 1
+    assert "government_feed_label" in cov
 
 
 def test_inferred_gis_ordering():

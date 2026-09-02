@@ -65,6 +65,24 @@ Time-based partitioning of `sightings`, replication, backups, and retention are 
 
 The health endpoint and UI show the active database type. SQLite is labelled as a dev fallback.
 
+## All-day demo (vehicle monitoring)
+
+Stop any `--reload` server (reload kills workers). Then:
+
+```powershell
+# .env must include CCTV_ACCESS_TOKEN, OLLAMA_API_KEY (cloud). Snap-to-road uses public OSRM (no Google key).
+$env:DEMO_AUTOSTART_WORKERS = "true"
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Leave that window open all day. Open http://127.0.0.1:8000
+
+- **Monitor** — plate + optional date → numbered map, dashed inferred camera-to-camera links, OSM **snap-to-road** possible path (OSRM Match by default, not a proven route), CSV/GeoJSON export.
+- **Investigate** — time range → which cameras had analytics running (not a full-video archive).
+- **Alerts / Watchlist** — exact match only; own-feed `GJ01AB1234` is the guaranteed demo hit.
+
+No Google Maps API. Default matching is the public OSRM Match server (no credit card). Optional Mapbox / Geoapify tokens stay in `.env` and are never sent to the browser.
+
 ## Run (Windows)
 
 ```powershell
@@ -88,6 +106,34 @@ Own-feed verification:
 python scripts\verify_own_feed.py
 python -m pytest -q
 ```
+
+## Optional Ollama vision OCR
+
+Tesseract remains the Day-1 local provider (`tesseract-opencv-p0`). If a **government RTSP/HLS** frame fails Indian plate syntax, the worker may call Ollama vision. Own-feed still uses Tesseract unless `OLLAMA_VISION_ON_OWN_FEED=true`.
+
+**Local Ollama** (no API key):
+
+```powershell
+$env:OLLAMA_URL = "http://127.0.0.1:11434"
+$env:OLLAMA_VISION_MODEL = "llava:7b"
+$env:OLLAMA_VISION_ENABLED = "true"
+```
+
+**Ollama Cloud** (no local `ollama serve`; **API key required**):
+
+1. Create a key at https://ollama.com/settings/keys
+2. Put it only in `.env` (gitignored), never in source or the UI:
+
+```powershell
+$env:OLLAMA_URL = "https://ollama.com"
+$env:OLLAMA_API_KEY = "<your cloud key>"
+$env:OLLAMA_VISION_MODEL = "gemma3:4b"
+$env:OLLAMA_VISION_ENABLED = "true"
+```
+
+If `OLLAMA_API_KEY` is set and `OLLAMA_URL` is still localhost, the app uses `https://ollama.com` automatically. Cloud requests send `Authorization: Bearer <key>`. Local requests send no key. `llava:*` is mapped to `gemma3:4b` on Cloud because LLaVA is not a Cloud-hosted model.
+
+Records use `model_id=ollama:<actual-model>`. The prompt never includes the watchlist. The key is never returned by `/api/health`. This is not YOLO, Awiros, or PP-OCRv5.
 
 ## Local Tesseract/OpenCV provider
 
@@ -138,6 +184,11 @@ GET  /api/workers
 ```
 
 Bounded in-process threads. No Kafka, Kubernetes, or distributed scheduler. Concurrent local/remote workers and open captures are capped (`MAX_CONCURRENT_WORKERS`, `MAX_OPEN_CAPTURES`). Overflow cameras are **queued** and remain `analytics_active=false`. Duplicate workers for the same camera are refused. `analytics_active` is true only while frames are actually being processed.
+
+Day 3 (Workers tab):
+
+1. **Measure government decode** — sequential RTSP probe of at most `MAX_CONCURRENT_CAPTURES` catalogue cameras. Records who actually decoded. If measured throughput is below the FPS hypothesis, sampling is lowered. This is not an 80,000-camera test.
+2. **Start accessible workers** — starts only cameras that already decoded (plus own-feed). Extra cameras queue and stay `analytics_active=false`.
 
 ## Government-feed ingest (authoritative catalogue)
 

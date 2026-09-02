@@ -35,6 +35,12 @@ def main() -> None:
     print("catalogue_auth_mode", settings.cctv_auth_mode or "none")
     print("cctv_token_configured", bool(settings.cctv_access_token))
     print("remote_inference_url", redact_url(settings.remote_inference_url) or "(not configured)")
+    try:
+        from app.services.ollama_vision import vision_status
+
+        print("ollama_vision", vision_status())
+    except Exception as exc:
+        print("ollama_vision FAIL", exc)
     print("max_concurrent_captures", settings.max_open_captures)
     net = host_network_report(include_rtsp_probe=False)
     print("network")

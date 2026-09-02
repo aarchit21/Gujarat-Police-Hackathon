@@ -47,6 +47,16 @@ def test_configured_token_not_embedded_in_source():
         assert token not in text, f"token leaked in {path}"
 
 
+def test_no_google_directions_client():
+    for path in (APP / "services").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert "maps.googleapis.com" not in text
+        assert "maps.google.com" not in text
+    js = (APP / "static" / "app.js").read_text(encoding="utf-8")
+    assert "googleapis.com" not in js
+    assert "google_maps" not in js
+
+
 def test_protected_rtsp_not_in_public_serializer():
     text = (APP / "services" / "serialize.py").read_text(encoding="utf-8")
     assert "protected_rtsp_url_or_reference" not in text or "redact" in text

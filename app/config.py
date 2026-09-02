@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     remote_inference_allowed_hosts: str = ""
     remote_fallback_local: bool = True
 
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_api_key: str = ""
+    ollama_vision_model: str = "llava:7b"
+    ollama_vision_enabled: bool = True
+    ollama_vision_on_own_feed: bool = False
+    ollama_vision_timeout_seconds: float = 90.0
+    ollama_vision_max_width: int = 768
+
     vendor_max_payload_bytes: int = 64_000
     max_upload_bytes: int = 8_000_000
 
@@ -69,6 +77,15 @@ class Settings(BaseSettings):
     keyframe_wait_seconds: float = 8.0
     live_analyze_max_frames: int = 24
     live_analyze_max_seconds: float = 20.0
+    # Snap-to-road. Default public OSRM Match — no key, no credit card. Google Directions is not used.
+    map_match_provider: str = "osrm"
+    osrm_match_url: str = "http://router.project-osrm.org"
+    map_match_radius_m: float = 25.0
+    mapbox_access_token: str = ""
+    geoapify_api_key: str = ""
+    google_maps_api_key: str = ""
+    demo_autostart_workers: bool = False
+    demo_decode_ok_only: bool = True
 
     def catalogue_host(self) -> str:
         return (urlparse(self.ingest_catalogue_url).hostname or "").lower()

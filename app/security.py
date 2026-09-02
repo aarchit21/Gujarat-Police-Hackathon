@@ -32,6 +32,13 @@ def redact_secrets(text: str | None) -> str:
     user = (settings.cctv_access_username or "").strip()
     if user and len(user) > 1 and user in raw:
         raw = raw.replace(user, "***")
+    ollama_key = (settings.ollama_api_key or "").strip()
+    if ollama_key and ollama_key in raw:
+        raw = raw.replace(ollama_key, "***")
+    for attr in ("google_maps_api_key", "mapbox_access_token", "geoapify_api_key"):
+        secret = (getattr(settings, attr, "") or "").strip()
+        if secret and secret in raw:
+            raw = raw.replace(secret, "***")
     return raw
 
 

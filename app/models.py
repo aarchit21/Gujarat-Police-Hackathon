@@ -54,6 +54,8 @@ class Camera(Base):
     last_pts_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     reconnect_count: Mapped[int] = mapped_column(Integer, default=0)
     active_protocol: Mapped[str] = mapped_column(String(16), default="")
+    measured_worker_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     sightings: Mapped[list["Sighting"]] = relationship(back_populates="camera")
 
@@ -153,3 +155,18 @@ class SystemState(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CameraActivity(Base):
+    """Analytics-active window on this host. Not a VMS recording archive."""
+
+    __tablename__ = "camera_activity"
+    __table_args__ = (Index("ix_activity_camera_start", "camera_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id"), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_id: Mapped[str] = mapped_column(String(64), default="")
+    protocol: Mapped[str] = mapped_column(String(16), default="")
+    reason: Mapped[str] = mapped_column(String(80), default="worker")

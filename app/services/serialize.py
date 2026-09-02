@@ -55,6 +55,8 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "last_pts_ms": c.last_pts_ms,
         "reconnect_count": c.reconnect_count,
         "active_protocol": c.active_protocol,
+        "measured_worker_fps": c.measured_worker_fps,
+        "measured_at": c.measured_at.isoformat() if c.measured_at else None,
         "route": select_processing_route(c),
     }
 

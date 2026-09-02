@@ -14,17 +14,24 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_operator, require_vendor
 from app.config import ROOT, settings
-from app.database import database_status, get_db, init_db
+from app.database import SessionLocal, database_status, get_db, init_db
 from app.models import Alert, AuditEvent, Camera, Sighting, WatchlistEntry
 from app.security import evidence_relpath_is_safe, redact_url
+from app.services.activity import cameras_active_at
+from app.services.capacity import capacity_snapshot, measure_government_decode, start_accessible_workers
 from app.services.catalogue import sync_catalogue
+from app.services.demo import autostart_if_configured
 from app.services.cost import estimate as estimate_cost
 from app.services.coverage import coverage
+from app.services.ollama_vision import vision_status
+from app.services.match import observed_plates, rematch_watchlist_entry
 from app.services.pipeline import analyze_camera
 from app.services.plates import normalize
 from app.services.processing import select_processing_route
 from app.services.reports import as_csv, as_json, sighting_rows
 from app.services.serialize import alert_json, camera_public, inferred_links, plate_keys, sighting_json
+from app.services.map_match import map_match_status
+from app.services.vehicle import vehicle_csv, vehicle_day, vehicle_geojson
 from app.services.vendor import VendorIngestError, ingest_vendor_event
 from app.services.workers import manager
 
@@ -34,6 +41,11 @@ STATIC = Path(__file__).resolve().parent / "static"
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    db = SessionLocal()
+    try:
+        autostart_if_configured(manager, db)
+    finally:
+        db.close()
     yield
     manager.stop_all()
 
@@ -68,6 +80,15 @@ class WatchlistIn(BaseModel):
     priority: str = "high"
     notes: str = ""
     active: bool = True
+    rematch: bool = True
+
+
+class WatchlistPatch(BaseModel):
+    active: bool | None = None
+    purpose: str | None = None
+    priority: str | None = None
+    notes: str | None = None
+    rematch: bool = False
 
 
 class CostIn(BaseModel):
@@ -118,11 +139,15 @@ def health(db: Session = Depends(get_db)):
         "tesseract": settings.tesseract_cmd,
         "database": database_status(),
         "remote_inference_configured": bool(settings.remote_inference_url),
+        "ollama_vision": vision_status(),
         "ingest_catalogue_url": redact_url(settings.ingest_catalogue_url),
         "catalogue_host": settings.catalogue_host(),
         "catalogue_auth_mode": settings.cctv_auth_mode or "none",
         "cctv_token_configured": bool(settings.cctv_access_token),
+        "map_match": map_match_status(),
+        "demo_autostart": settings.demo_autostart_workers,
         "workers": snap,
+        "capacity": capacity_snapshot(db),
         **_cov(db),
     }
 
@@ -213,18 +238,67 @@ def add_watchlist(
     db: Session = Depends(get_db),
     actor: str = Depends(require_operator),
 ):
-    entry = WatchlistEntry(
-        plate_raw=body.plate_raw,
-        plate_norm=normalize(body.plate_raw),
-        purpose=body.purpose,
-        priority=body.priority,
-        notes=body.notes,
-        active=body.active,
-    )
-    db.add(entry)
+    key = normalize(body.plate_raw)
+    if not key:
+        raise HTTPException(400, "plate is empty after normalisation")
+    entry = db.scalar(select(WatchlistEntry).where(WatchlistEntry.plate_norm == key))
+    created = entry is None
+    if entry is None:
+        entry = WatchlistEntry(
+            plate_raw=body.plate_raw,
+            plate_norm=key,
+            purpose=body.purpose,
+            priority=body.priority,
+            notes=body.notes,
+            active=body.active,
+        )
+        db.add(entry)
+        db.flush()
+    else:
+        entry.active = body.active
+        entry.purpose = body.purpose or entry.purpose
+        entry.priority = body.priority or entry.priority
+        if body.notes:
+            entry.notes = body.notes
     db.add(AuditEvent(actor=actor, action="watchlist_add", detail=entry.plate_norm))
+    rematch = {"scanned": 0, "alerts_created": 0}
+    if body.rematch and entry.active:
+        rematch = rematch_watchlist_entry(db, entry)
     db.commit()
-    return {"ok": True, "id": entry.id, "plate_norm": entry.plate_norm}
+    return {
+        "ok": True,
+        "id": entry.id,
+        "plate_norm": entry.plate_norm,
+        "created": created,
+        "rematch": rematch,
+    }
+
+
+@app.patch("/api/watchlist/{watchlist_id}")
+def patch_watchlist(
+    watchlist_id: int,
+    body: WatchlistPatch,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    entry = db.get(WatchlistEntry, watchlist_id)
+    if entry is None:
+        raise HTTPException(404, "watchlist entry not found")
+    data = body.model_dump(exclude_none=True)
+    rematch_flag = data.pop("rematch", False)
+    for field, value in data.items():
+        setattr(entry, field, value)
+    db.add(AuditEvent(actor=actor, action="watchlist_patch", detail=f"{watchlist_id} {data}"))
+    rematch = {"scanned": 0, "alerts_created": 0}
+    if rematch_flag and entry.active:
+        rematch = rematch_watchlist_entry(db, entry)
+    db.commit()
+    return {"ok": True, "id": entry.id, "active": entry.active, "rematch": rematch}
+
+
+@app.get("/api/observed-plates")
+def api_observed_plates(db: Session = Depends(get_db)):
+    return observed_plates(db)
 
 
 @app.get("/api/sightings")
@@ -237,22 +311,73 @@ def list_sightings(plate: str | None = None, db: Session = Depends(get_db)):
 
 
 @app.get("/api/vehicles/{plate}")
-def vehicle_history(plate: str, db: Session = Depends(get_db)):
-    key = normalize(plate)
-    rows = [s for s in db.scalars(select(Sighting).order_by(Sighting.source_time)) if key in plate_keys(s)]
-    points = []
-    for s in rows:
-        cam = s.camera
-        points.append(
-            {
-                **sighting_json(s),
-                "lat": cam.lat if cam else None,
-                "lng": cam.lng if cam else None,
-                "city": cam.city if cam else None,
-                "department": cam.department if cam else None,
-            }
-        )
-    return {"plate_norm": key, "sightings": points, "inferred_links": inferred_links(points)}
+def vehicle_history(
+    plate: str,
+    day: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    routes: bool = False,
+    db: Session = Depends(get_db),
+):
+    return vehicle_day(db, plate, day=day, start=start, end=end, include_routes=routes)
+
+
+@app.get("/api/vehicles/{plate}/possible-routes")
+def vehicle_possible_routes(
+    plate: str,
+    day: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    db: Session = Depends(get_db),
+):
+    payload = vehicle_day(db, plate, day=day, start=start, end=end, include_routes=True)
+    dumped = json.dumps(payload)
+    for attr in ("google_maps_api_key", "mapbox_access_token", "geoapify_api_key"):
+        secret = (getattr(settings, attr, "") or "").strip()
+        if secret and secret in dumped:
+            raise HTTPException(500, "route payload leaked a secret")
+    return payload
+
+
+@app.get("/api/vehicles/{plate}/export.csv")
+def vehicle_export_csv(
+    plate: str,
+    day: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    payload = vehicle_day(db, plate, day=day, start=start, end=end, include_routes=False)
+    db.add(AuditEvent(actor=actor, action="vehicle_csv", detail=payload["plate_norm"]))
+    db.commit()
+    return PlainTextResponse(vehicle_csv(payload), media_type="text/csv")
+
+
+@app.get("/api/vehicles/{plate}/export.geojson")
+def vehicle_export_geojson(
+    plate: str,
+    day: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    payload = vehicle_day(db, plate, day=day, start=start, end=end, include_routes=True)
+    db.add(AuditEvent(actor=actor, action="vehicle_geojson", detail=payload["plate_norm"]))
+    db.commit()
+    return vehicle_geojson(payload)
+
+
+@app.get("/api/cameras/active-at")
+def api_active_at(
+    at: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    window_minutes: int = 30,
+    db: Session = Depends(get_db),
+):
+    return cameras_active_at(db, at=at, start=start, end=end, window_minutes=window_minutes)
 
 
 @app.get("/api/alerts")
@@ -310,6 +435,35 @@ def stop_worker(
 def stop_all_workers(actor: str = Depends(require_operator)):
     manager.stop_all()
     return {"ok": True, "actor": actor}
+
+
+class StartAccessibleIn(BaseModel):
+    decode_ok_only: bool = True
+
+
+@app.post("/api/workers/start-accessible")
+def api_start_accessible(
+    body: StartAccessibleIn | None = None,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    payload = body or StartAccessibleIn()
+    return start_accessible_workers(manager, db, actor=actor, decode_ok_only=payload.decode_ok_only)
+
+
+@app.post("/api/capacity/measure")
+def api_capacity_measure(
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    db.add(AuditEvent(actor=actor, action="capacity_measure_request", detail="sequential government decode probe"))
+    db.commit()
+    return measure_government_decode(db)
+
+
+@app.get("/api/capacity")
+def api_capacity(db: Session = Depends(get_db)):
+    return capacity_snapshot(db)
 
 
 @app.post("/api/catalogue/sync")

@@ -26,7 +26,10 @@ header .meta { font-size: 12px; color: #d0d7e2; }
   background: #fff; border-bottom: 1px solid var(--line); font-size: 12px;
 }
 .stats span { background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
-.layout { display: grid; grid-template-columns: 1.4fr 1fr; height: calc(100% - 148px); }
+.demo {
+  background: #1b365d; color: #f7f3e8; padding: 6px 16px; font-size: 12px;
+}
+.layout { display: grid; grid-template-columns: 1.4fr 1fr; height: calc(100% - 172px); }
 .map-wrap { position: relative; min-height: 420px; }
 #map { height: 100%; min-height: 420px; }
 aside { overflow: auto; padding: 14px 16px 24px; border-left: 1px solid var(--line); }

@@ -23,6 +23,7 @@ from app.services.ingest import (
     scale_box,
 )
 from app.services.match import match_sighting
+from app.services.ollama_vision import OllamaVisionError, infer_bgr, should_use_vision
 from app.services.plates import normalize, syntax_ok, vote
 from app.services.processing import select_processing_route, target_fps
 from app.services.remote import RemoteInferenceError, infer_jpeg
@@ -329,7 +330,7 @@ def _read_plate(
             if not settings.remote_fallback_local:
                 return "", "", 0.0, None, None, "", "", "remote_gpu"
     read = reader(bgr)
-    return (
+    plate_raw, plate_norm, conf, crop, box, model_id, model_hash, provider = (
         read.plate_raw,
         read.plate_norm,
         read.confidence,
@@ -339,6 +340,27 @@ def _read_plate(
         local_hash,
         "local",
     )
+    if should_use_vision(camera, syntax_ok(plate_norm)):
+        try:
+            # False OpenCV contours are often tiny; send the full inference frame.
+            use_crop = (
+                crop is not None
+                and getattr(crop, "size", 0)
+                and crop.shape[0] >= 40
+                and crop.shape[1] >= 100
+            )
+            target = crop if use_crop else bgr
+            vision = infer_bgr(target)
+            if syntax_ok(vision.plate_norm) or (vision.plate_norm and not syntax_ok(plate_norm)):
+                plate_raw = vision.plate_raw or vision.plate_norm
+                plate_norm = vision.plate_norm
+                conf = max(conf, vision.confidence)
+                model_id = vision.model_id
+                model_hash = vision.model_hash
+                provider = "ollama_vision"
+        except OllamaVisionError as exc:
+            camera.last_error = str(exc)
+    return plate_raw, plate_norm, conf, crop, box, model_id, model_hash, provider
 
 
 def analyze_camera(

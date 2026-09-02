@@ -10,13 +10,14 @@
 <body>
   <header>
     <div>
-      <h1>Gujarat CCTV Hybrid P0</h1>
-      <div class="meta">Customised Model 5 · Model 1 registry+GIS always on · Model 2 first feed-to-alert · no central VMS</div>
+      <h1>Gujarat vehicle monitoring P0</h1>
+      <div class="meta">Registry + ANPR watchlist + inferred GIS · not a central VMS · OSM snap-to-road is a possible path, not proven</div>
     </div>
     <div class="meta" id="hostMeta">loading host…</div>
   </header>
   <div class="banner" id="coverageBanner">Coverage loading…</div>
   <div class="stats" id="statsBar"></div>
+  <div class="demo" id="demoStrip">Demo: workers idle · last sighting —</div>
   <div class="layout">
     <div class="map-wrap">
       <div id="map"></div>
@@ -38,14 +39,42 @@
       <p class="legend">Own-feed cameras are separate from the government catalogue. Catalogue count is whatever cameras.json returns — not a hardcoded 50. Map lines are inferred, not proven roads. SQLite is a local fallback — PostgreSQL/PostGIS is the production target.</p>
 
       <div class="tabs">
-        <button class="tab on" data-tab="alerts">Alerts</button>
+        <button class="tab on" data-tab="monitor">Monitor</button>
+        <button class="tab" data-tab="investigate">Investigate</button>
+        <button class="tab" data-tab="alerts">Alerts</button>
+        <button class="tab" data-tab="watchlist">Watchlist</button>
         <button class="tab" data-tab="ledger">Ledger</button>
         <button class="tab" data-tab="workers">Workers</button>
         <button class="tab" data-tab="cost">Cost</button>
         <button class="tab" data-tab="reports">Reports</button>
       </div>
 
-      <section data-panel="alerts">
+      <section data-panel="monitor">
+        <h2>Vehicle day map</h2>
+        <p class="legend">Numbered sightings in time order. Gold dashed = inferred camera-to-camera. Navy = OSM snap-to-road possible path (not a verified route). No Google Maps key.</p>
+        <div class="row">
+          <input id="monPlate" value="GJ01AB1234" />
+          <input id="monDay" type="date" />
+          <button id="btnMonitor">Show day path</button>
+          <a class="button secondary" id="dlDayCsv" href="#">CSV</a>
+          <a class="button secondary" id="dlDayGeo" href="#">GeoJSON</a>
+        </div>
+        <div id="monitorStatus" class="card muted">Enter a plate to plot the last 24 hours (or pick a date).</div>
+        <div id="monitorTimeline"></div>
+      </section>
+
+      <section data-panel="investigate" class="hidden">
+        <h2>Which cameras were analytics-active?</h2>
+        <p class="legend">Saves investigation time. This is analytics-on-this-host, not a full-video archive. Departmental recording stays local.</p>
+        <div class="row">
+          <input id="invStart" type="datetime-local" />
+          <input id="invEnd" type="datetime-local" />
+          <button id="btnInvestigate">Find cameras</button>
+        </div>
+        <div id="investigateOut" class="card muted">Pick a time range (or a single time in Start).</div>
+      </section>
+
+      <section data-panel="alerts" class="hidden">
         <h2>Find designated plate</h2>
         <div class="row">
           <input id="plateQuery" value="GJ01AB1234" />
@@ -56,14 +85,40 @@
         <div id="alerts"></div>
       </section>
 
+      <section data-panel="watchlist" class="hidden">
+        <h2>Authorised watchlist</h2>
+        <p class="legend">Exact normalised match only. Adding a plate rematches existing persisted sightings. Government video is not altered to manufacture a hit.</p>
+        <div class="row">
+          <input id="wlPlate" placeholder="Plate e.g. GJ01AB1234" />
+          <input id="wlPurpose" placeholder="purpose" value="stolen_vehicle" />
+          <select id="wlPriority">
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+          </select>
+          <button id="btnWatchAdd">Add and rematch</button>
+        </div>
+        <div id="watchlistRows"></div>
+        <h2>Observed plates (from sightings)</h2>
+        <div id="observedPlates"></div>
+      </section>
+
       <section data-panel="ledger" class="hidden">
         <h2>Camera ledger</h2>
+        <div class="row">
+          <select id="ledgerFilter">
+            <option value="gov">Government catalogue</option>
+            <option value="own">Own-feed</option>
+            <option value="placeholder">Placeholders</option>
+            <option value="all">All</option>
+          </select>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>ID</th><th>Origin</th><th>Pri</th><th>Mode</th><th>Status</th>
-                <th>Cat live</th><th>Decode</th><th>Proto</th><th>Analytics</th>
+                <th>Cat live</th><th>Decode</th><th>Proto</th><th>Size</th><th>Analytics</th>
               </tr>
             </thead>
             <tbody id="ledger"></tbody>
@@ -74,6 +129,12 @@
 
       <section data-panel="workers" class="hidden">
         <h2>Worker manager</h2>
+        <p class="legend">Day 3: measure decode first, then start only cameras that actually decoded. Capacity is limited; queued cameras stay analytics_active=false.</p>
+        <div id="capacityPanel" class="card muted">No capacity measurement yet.</div>
+        <div class="row">
+          <button id="btnMeasure">Measure government decode</button>
+          <button id="btnStartAccessible">Start accessible workers</button>
+        </div>
         <div id="workerPanel" class="card muted">No worker snapshot yet.</div>
         <div class="row">
           <input id="workerCam" placeholder="Camera ID" />
@@ -87,7 +148,7 @@
         <h2>Capacity / cost estimator</h2>
         <p class="legend">Every result is an estimate, not a measured production result. No savings percentage is claimed.</p>
         <div class="grid-form">
-          <label>Cameras <input id="c_count" type="number" value="50" /></label>
+          <label>Cameras <input id="c_count" type="number" value="30" /></label>
           <label>Avg bitrate kbps <input id="c_br" type="number" value="1500" /></label>
           <label>Target analysis FPS <input id="c_fps" type="number" value="2" step="0.1" /></label>
           <label>Active cameras <input id="c_active" type="number" value="2" /></label>

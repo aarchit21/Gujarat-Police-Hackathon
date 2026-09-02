@@ -12,6 +12,7 @@ from typing import Any, Callable
 from app.config import settings
 from app.database import SessionLocal
 from app.models import AuditEvent, Camera
+from app.services.activity import close_activity, open_activity
 from app.security import hls_requires_server_credential, redact_url
 from app.services.ingest import CaptureRegistry, SourceOpenError, diagnostics, open_video_source
 from app.services.pipeline import FrameProcessor, iter_camera_frames, process_frame_iter
@@ -183,6 +184,7 @@ class WorkerManager:
             if camera_id in self._queue:
                 self._queue.remove(camera_id)
         thread.start()
+        open_activity(db, camera, run_id=state.run_id, reason="worker_start")
         db.add(AuditEvent(actor=actor, action="worker_start", detail=camera_id))
         db.commit()
         return {"ok": True, "camera_id": camera_id, "state": "starting", "run_id": state.run_id}
@@ -197,6 +199,7 @@ class WorkerManager:
         camera = db.get(Camera, camera_id)
         if camera is not None:
             camera.analytics_active = False
+        close_activity(db, camera_id, reason="worker_stop")
         db.add(AuditEvent(actor=actor, action="worker_stop", detail=camera_id))
         db.commit()
         return {"ok": True, "camera_id": camera_id, "state": "stopping"}
@@ -233,6 +236,7 @@ class WorkerManager:
                     camera.analytics_active = False
                     if state.error and not camera.last_error:
                         camera.last_error = state.error
+                    close_activity(db, camera_id, reason="worker_exit")
                     db.add(AuditEvent(action="worker_exit", detail=f"{camera_id} {state.status} {state.error}"[:2000]))
                     db.commit()
             finally:
