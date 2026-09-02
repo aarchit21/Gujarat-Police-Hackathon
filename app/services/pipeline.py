@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import AuditEvent, Camera, Sighting
-from app.services.anpr import MODEL_ID, load_bgr, local_model_hash, read_frame
+from app.services.anpr import load_bgr, local_model_hash, prepare_live_anpr_frame
 from app.services.evidence import save_crop
 from app.services.ingest import (
     SourceOpenError,
@@ -23,7 +23,8 @@ from app.services.ingest import (
     scale_box,
 )
 from app.services.match import match_sighting
-from app.services.ollama_vision import OllamaVisionError, infer_bgr, should_use_vision
+from app.services.ollama_vision import OllamaVisionError, infer_vehicle
+from app.services.vehicle_event import build_vehicle_event, is_recordable_plate
 from app.services.plates import normalize, syntax_ok, vote
 from app.services.processing import select_processing_route, target_fps
 from app.services.remote import RemoteInferenceError, infer_jpeg
@@ -52,6 +53,10 @@ def persist_sighting(
     frame_shape: tuple[int, int] | None = None,
     vendor_event_id: str | None = None,
     vendor_payload_hash: str = "",
+    vehicle_type: str = "",
+    vehicle_make: str = "",
+    vehicle_model: str = "",
+    vehicle_color: str = "",
 ) -> tuple[Sighting, object | None, bool]:
     ingest = ingest_time or datetime.now(timezone.utc)
     source_time, _offset_applied = source_time_from_ingest(ingest, camera.clock_offset_ms)
@@ -80,12 +85,26 @@ def persist_sighting(
         bbox_h=box[3] if box else None,
         frame_width=frame_shape[1] if frame_shape else camera.width,
         frame_height=frame_shape[0] if frame_shape else camera.height,
+        vehicle_type=vehicle_type,
+        vehicle_make=vehicle_make,
+        vehicle_model=vehicle_model,
+        vehicle_color=vehicle_color,
     )
     db.add(sighting)
     db.flush()
     if not sighting.id:
         raise RuntimeError("sighting row was not persisted")
+    extras = {
+        "vehicle_type": vehicle_type,
+        "vehicle_make": vehicle_make,
+        "vehicle_model": vehicle_model,
+        "vehicle_color": vehicle_color,
+    }
+    event = build_vehicle_event(camera=camera, sighting=sighting, extras=extras)
+    event["watchlist_matched"] = False
     alert, created = match_sighting(db, sighting)
+    event["watchlist_matched"] = bool(created or alert)
+    sighting.vehicle_json = event
     camera.last_frame_at = ingest
     camera.source_pts_ms = source_pts_ms
     camera.last_pts_ms = source_pts_ms
@@ -159,7 +178,7 @@ class FrameProcessor:
                 "reason": "explicit file/own-feed analysis on this host",
             }
         self.local_hash = local_model_hash()
-        self.reader = read_fn or read_frame
+        self.reader = read_fn
         self.remote_client = remote_client
 
     def reset_passage(self, pts_ms: float | None, reason: str) -> None:
@@ -188,7 +207,7 @@ class FrameProcessor:
             self.camera.width = w
             self.camera.height = h
         small, scale = resize_for_inference(bgr)
-        plate_raw, plate_norm, conf, crop, box, model_id, model_hash, provider = _read_plate(
+        result = _read_plate(
             self.camera,
             small,
             provider_kind=self.provider_kind,
@@ -196,7 +215,14 @@ class FrameProcessor:
             remote_client=self.remote_client,
             local_hash=self.local_hash,
         )
-        box = scale_box(box, scale)
+        plate_raw = result["plate_raw"]
+        plate_norm = result["plate_norm"]
+        conf = result["confidence"]
+        crop = result["crop"]
+        box = scale_box(result["box"], scale)
+        live = self.camera.source_type in {"rtsp", "hls", "onvif"}
+        if live and not is_recordable_plate(plate_norm):
+            return None
         if not plate_raw and not plate_norm:
             return None
         self.raws.append(plate_raw or plate_norm)
@@ -210,16 +236,20 @@ class FrameProcessor:
             plate_voted=voted,
             syntax=syntax_ok(plate_norm or voted),
             confidence=conf,
-            model_id=model_id,
-            model_hash=model_hash,
+            model_id=result["model_id"],
+            model_hash=result["model_hash"],
             evidence_path=evidence,
             run_id=self.run_id,
             frame_index=frame_index,
             passage_id=self.passage,
             source_pts_ms=pts_ms,
-            provider=provider,
+            provider=result["provider"],
             box=box,
             frame_shape=(h, w),
+            vehicle_type=result.get("vehicle_type") or "",
+            vehicle_make=result.get("vehicle_make") or "",
+            vehicle_model=result.get("vehicle_model") or "",
+            vehicle_color=result.get("vehicle_color") or "",
         )
         self.created += 1
         if alert_created:
@@ -294,6 +324,23 @@ def process_frame_iter(
                 db.commit()
 
 
+def _empty_read() -> dict:
+    return {
+        "plate_raw": "",
+        "plate_norm": "",
+        "confidence": 0.0,
+        "crop": None,
+        "box": None,
+        "model_id": "",
+        "model_hash": "",
+        "provider": "",
+        "vehicle_type": "",
+        "vehicle_make": "",
+        "vehicle_model": "",
+        "vehicle_color": "",
+    }
+
+
 def _read_plate(
     camera: Camera,
     bgr,
@@ -302,7 +349,54 @@ def _read_plate(
     reader,
     remote_client,
     local_hash: str,
-) -> tuple[str, str, float, Any, tuple[int, int, int, int] | None, str, str, str]:
+) -> dict:
+    if reader is not None:
+        read = reader(bgr)
+        out = _empty_read()
+        out.update(
+            {
+                "plate_raw": read.plate_raw,
+                "plate_norm": read.plate_norm,
+                "confidence": read.confidence,
+                "crop": read.crop_bgr,
+                "box": read.box,
+                "model_id": "test-reader",
+                "model_hash": local_hash,
+                "provider": "local",
+            }
+        )
+        return out
+    live = camera.source_type in {"rtsp", "hls", "onvif"}
+    if settings.ollama_vision_enabled:
+        try:
+            target = prepare_live_anpr_frame(bgr) if live else bgr
+            vision = infer_vehicle(target, camera_id=camera.id)
+            if is_recordable_plate(vision.get("plate_norm")):
+                out = _empty_read()
+                out.update(
+                    {
+                        "plate_raw": vision.get("plate_raw") or vision.get("plate_norm") or "",
+                        "plate_norm": vision.get("plate_norm") or "",
+                        "confidence": float(vision.get("confidence") or 0.0),
+                        "crop": target,
+                        "box": None,
+                        "model_id": vision.get("model_id") or "",
+                        "model_hash": vision.get("model_hash") or "",
+                        "provider": "ollama_vision",
+                        "vehicle_type": vision.get("vehicle_type") or "unknown",
+                        "vehicle_make": vision.get("vehicle_make") or "",
+                        "vehicle_model": vision.get("vehicle_model") or "",
+                        "vehicle_color": vision.get("vehicle_color") or "",
+                    }
+                )
+                return out
+            if vision.get("skipped"):
+                return _empty_read()
+            camera.last_error = "ollama: no readable plate in this frame"
+            return _empty_read()
+        except OllamaVisionError as exc:
+            camera.last_error = str(exc)
+            return _empty_read()
     if provider_kind == "remote_gpu" and settings.remote_inference_url:
         try:
             import cv2
@@ -315,52 +409,25 @@ def _read_plate(
             if remote.box:
                 x, y, w, h = remote.box
                 crop = bgr[max(0, y) : y + h, max(0, x) : x + w].copy()
-            return (
-                remote.plate_raw,
-                normalize(remote.plate_raw),
-                remote.confidence,
-                crop,
-                remote.box,
-                remote.model_id,
-                remote.model_hash,
-                "remote_gpu",
+            out = _empty_read()
+            out.update(
+                {
+                    "plate_raw": remote.plate_raw,
+                    "plate_norm": normalize(remote.plate_raw),
+                    "confidence": remote.confidence,
+                    "crop": crop,
+                    "box": remote.box,
+                    "model_id": remote.model_id,
+                    "model_hash": remote.model_hash,
+                    "provider": "remote_gpu",
+                }
             )
+            return out
         except RemoteInferenceError as exc:
             camera.last_error = str(exc)
-            if not settings.remote_fallback_local:
-                return "", "", 0.0, None, None, "", "", "remote_gpu"
-    read = reader(bgr)
-    plate_raw, plate_norm, conf, crop, box, model_id, model_hash, provider = (
-        read.plate_raw,
-        read.plate_norm,
-        read.confidence,
-        read.crop_bgr,
-        read.box,
-        MODEL_ID,
-        local_hash,
-        "local",
-    )
-    if should_use_vision(camera, syntax_ok(plate_norm)):
-        try:
-            # False OpenCV contours are often tiny; send the full inference frame.
-            use_crop = (
-                crop is not None
-                and getattr(crop, "size", 0)
-                and crop.shape[0] >= 40
-                and crop.shape[1] >= 100
-            )
-            target = crop if use_crop else bgr
-            vision = infer_bgr(target)
-            if syntax_ok(vision.plate_norm) or (vision.plate_norm and not syntax_ok(plate_norm)):
-                plate_raw = vision.plate_raw or vision.plate_norm
-                plate_norm = vision.plate_norm
-                conf = max(conf, vision.confidence)
-                model_id = vision.model_id
-                model_hash = vision.model_hash
-                provider = "ollama_vision"
-        except OllamaVisionError as exc:
-            camera.last_error = str(exc)
-    return plate_raw, plate_norm, conf, crop, box, model_id, model_hash, provider
+            return _empty_read()
+    camera.last_error = "Ollama vision is the ANPR provider; Tesseract is not used"
+    return _empty_read()
 
 
 def analyze_camera(

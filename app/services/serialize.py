@@ -1,6 +1,28 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 from app.models import Alert, Camera, Sighting
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def utc_iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def ist_label(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 from app.security import hls_requires_server_credential, redact_url
 from app.services.coverage import camera_origin
 from app.services.processing import select_processing_route
@@ -16,6 +38,8 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "lng": c.lng,
         "latitude": c.lat,
         "longitude": c.lng,
+        "coords_source": c.coords_source or "",
+        "coords_are_placeholder": (c.coords_source or "") == "placeholder",
         "source_type": c.source_type,
         "source_uri_redacted": redact_url(c.source_uri),
         "has_rtsp": bool(c.protected_rtsp_url_or_reference or (c.source_type == "rtsp" and c.source_uri)),
@@ -31,7 +55,8 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "analytics_active": bool(c.analytics_active),
         "preview_active": bool(preview_active),
         "worker_state": worker_state,
-        "last_frame_at": c.last_frame_at.isoformat() if c.last_frame_at else None,
+        "last_frame_at": utc_iso(c.last_frame_at),
+        "last_frame_at_ist": ist_label(c.last_frame_at),
         "last_error": c.last_error,
         "capabilities": c.capabilities,
         "vendor": c.vendor,
@@ -61,13 +86,28 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
     }
 
 
+def parse_vehicle_blob(raw) -> dict | None:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            loaded = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    return None
+
+
 def sighting_json(s: Sighting) -> dict:
+    event = parse_vehicle_blob(getattr(s, "vehicle_json", None))
     return {
         "id": s.id,
         "camera_id": s.camera_id,
         "passage_id": s.passage_id,
-        "source_time": s.source_time.isoformat() if s.source_time else None,
-        "ingest_time": s.ingest_time.isoformat() if s.ingest_time else None,
+        "source_time": utc_iso(s.source_time),
+        "source_time_ist": ist_label(s.source_time),
+        "ingest_time": utc_iso(s.ingest_time),
+        "ingest_time_ist": ist_label(s.ingest_time),
         "source_pts_ms": s.source_pts_ms,
         "plate_raw": s.plate_raw,
         "plate_norm": s.plate_norm,
@@ -80,6 +120,11 @@ def sighting_json(s: Sighting) -> dict:
         "run_id": s.run_id,
         "frame_index": s.frame_index,
         "provider": s.provider,
+        "vehicle_type": getattr(s, "vehicle_type", "") or "",
+        "vehicle_make": getattr(s, "vehicle_make", "") or "",
+        "vehicle_model": getattr(s, "vehicle_model", "") or "",
+        "vehicle_color": getattr(s, "vehicle_color", "") or "",
+        "vehicle": event,
     }
 
 
@@ -91,21 +136,27 @@ def plate_keys(s: Sighting) -> set[str]:
 
 def alert_json(a: Alert, cam: Camera | None) -> dict:
     s = a.sighting
+    event = parse_vehicle_blob(getattr(s, "vehicle_json", None)) if s else None
+    veh = (event or {}).get("vehicle") or {}
     return {
         "id": a.id,
         "plate_norm": a.plate_norm,
         "match_type": a.match_type,
         "status": a.status,
         "camera_id": a.camera_id,
+        "camera_name": cam.name if cam else "",
         "city": cam.city if cam else "",
         "department": cam.department if cam else "",
+        "location": (event or {}).get("location") or (cam.city if cam else "") or (cam.name if cam else ""),
         "lat": cam.lat if cam else None,
         "lng": cam.lng if cam else None,
         "passage_id": a.passage_id,
-        "created_at": a.created_at.isoformat() if a.created_at else None,
+        "created_at": utc_iso(a.created_at),
+        "created_at_ist": ist_label(a.created_at),
         "evidence_path": s.evidence_path if s else "",
-        "source_time": s.source_time.isoformat() if s and s.source_time else None,
-        "ingest_time": s.ingest_time.isoformat() if s and s.ingest_time else None,
+        "source_time": utc_iso(s.source_time) if s else None,
+        "source_time_ist": ist_label(s.source_time) if s else None,
+        "ingest_time": utc_iso(s.ingest_time) if s else None,
         "confidence": s.confidence if s else None,
         "plate_raw": s.plate_raw if s else "",
         "plate_voted": s.plate_voted if s else "",
@@ -113,6 +164,11 @@ def alert_json(a: Alert, cam: Camera | None) -> dict:
         "model_hash": s.model_hash if s else "",
         "run_id": s.run_id if s else "",
         "sighting_id": a.sighting_id,
+        "vehicle_type": getattr(s, "vehicle_type", "") or veh.get("type") or "",
+        "vehicle_color": getattr(s, "vehicle_color", "") or veh.get("color") or "",
+        "vehicle_make": getattr(s, "vehicle_make", "") or veh.get("make") or "",
+        "vehicle_model": getattr(s, "vehicle_model", "") or veh.get("model") or "",
+        "vehicle": event,
     }
 
 

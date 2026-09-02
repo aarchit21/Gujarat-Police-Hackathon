@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Generator
 from urllib.parse import urlparse
 
@@ -9,6 +10,22 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.config import settings
+
+
+def soft_json_loads(value):
+    """SQLite older rows used '' for vehicle_json; JSON() cannot json.loads that."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() == "null":
+            return None
+        return json.loads(text)
+    return value
 
 
 class Base(DeclarativeBase):
@@ -57,6 +74,8 @@ def make_engine(url: str | None = None, *, pool_size: int | None = None, max_ove
         kwargs: dict = {
             "connect_args": {"check_same_thread": False},
             "future": True,
+            "json_serializer": json.dumps,
+            "json_deserializer": soft_json_loads,
         }
         if ":memory:" in target:
             kwargs["poolclass"] = StaticPool
@@ -73,6 +92,8 @@ def make_engine(url: str | None = None, *, pool_size: int | None = None, max_ove
     return create_engine(
         target,
         future=True,
+        json_serializer=json.dumps,
+        json_deserializer=soft_json_loads,
         pool_size=pool_size if pool_size is not None else settings.db_pool_size,
         max_overflow=max_overflow if max_overflow is not None else settings.db_max_overflow,
         pool_pre_ping=True,

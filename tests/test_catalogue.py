@@ -11,7 +11,7 @@ from app.services.catalogue import (
     upsert_from_catalogue,
 )
 from app.services.pipeline import persist_sighting
-from tests.conftest import add_watchlist
+from tests.conftest import add_camera, add_watchlist
 
 
 def test_default_catalogue_url_is_cameras_json():
@@ -115,6 +115,33 @@ def test_missing_catalogue_cameras_retain_history(db):
 def test_parse_catalogue_list():
     items = parse_catalogue([{"id": "a", "rtspUrl": "rtsp://x"}])
     assert items[0]["rtsp_url"] == "rtsp://x"
+    assert items[0]["live"] is True
+
+
+def test_id_name_catalogue_is_live_and_not_stacked(db):
+    from app.services.catalogue import backfill_catalogue_display
+
+    payload = {"cameras": [{"id": "cam01", "name": "One"}, {"id": "cam02", "name": "Two"}]}
+    sync_catalogue(db, url="https://cctv.corp8.cloud/cameras.json", fetcher=lambda _url: payload)
+    a = db.get(Camera, "cam01")
+    b = db.get(Camera, "cam02")
+    assert a.catalogue_live is True
+    assert b.catalogue_live is True
+    assert (a.lat, a.lng) != (b.lat, b.lng)
+    assert a.coords_source == "placeholder"
+    assert b.coords_source == "placeholder"
+    stacked = add_camera(db, id="cam99", catalogue_camera_id="cam99", lat=22.3, lng=71.2, catalogue_live=False)
+    backfill_catalogue_display(db)
+    db.commit()
+    stacked = db.get(Camera, "cam99")
+    assert stacked.catalogue_live is True
+    assert not (stacked.lat == 22.3 and stacked.lng == 71.2)
+
+
+def test_explicit_live_false_stays_false(db):
+    payload = {"cameras": [{"id": "cam-off", "live": False}]}
+    sync_catalogue(db, url="https://cctv.corp8.cloud/cameras.json", fetcher=lambda _url: payload)
+    assert db.get(Camera, "cam-off").catalogue_live is False
 
 
 def test_auth_none(monkeypatch):

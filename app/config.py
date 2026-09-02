@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     evidence_dir: Path = ROOT / "data" / "evidence"
     frames_dir: Path = ROOT / "data" / "frames"
-    tesseract_cmd: str = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    tesseract_cmd: str = ""
     admin_token: str = "p0-operator"
     vendor_ingest_token: str = "p0-vendor"
     require_auth: bool = True
@@ -54,9 +54,10 @@ class Settings(BaseSettings):
     ollama_api_key: str = ""
     ollama_vision_model: str = "llava:7b"
     ollama_vision_enabled: bool = True
-    ollama_vision_on_own_feed: bool = False
+    ollama_vision_on_own_feed: bool = True
     ollama_vision_timeout_seconds: float = 90.0
     ollama_vision_max_width: int = 768
+    ollama_live_interval_seconds: float = 2.5
 
     vendor_max_payload_bytes: int = 64_000
     max_upload_bytes: int = 8_000_000

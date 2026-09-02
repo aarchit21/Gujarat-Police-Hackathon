@@ -33,14 +33,15 @@ def test_resolve_prefers_installed_candidate(monkeypatch):
     assert resolve_vision_model(["llama3:8b", "llava:7b"]) == "llava:7b"
 
 
-def test_should_use_vision_only_when_tesseract_fails_on_rtsp(db, monkeypatch):
+def test_should_use_vision_when_enabled(db, monkeypatch):
+    monkeypatch.setattr("app.services.ollama_vision._cloud_disabled_reason", "")
     monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_enabled", True)
-    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_on_own_feed", False)
     cam = add_camera(db, source_type="rtsp")
     assert should_use_vision(cam, tess_syntax=False) is True
-    assert should_use_vision(cam, tess_syntax=True) is False
     own = add_camera(db, id="CAM-OWN", source_type="image_dir")
-    assert should_use_vision(own, tess_syntax=False) is False
+    assert should_use_vision(own, tess_syntax=False) is True
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_enabled", False)
+    assert should_use_vision(cam, tess_syntax=False) is False
 
 
 def test_infer_bgr_success_with_mock(monkeypatch):
@@ -86,16 +87,52 @@ def test_cloud_sends_bearer_and_does_not_use_llava_default(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "ollama.com"
+        assert request.url.path == "/api/chat"
         assert request.headers.get("authorization") == "Bearer unit-ollama-cloud-key"
         assert b"unit-ollama-cloud-key" not in request.content
         payload = json.loads(request.content.decode())
-        assert payload["model"] == "gemma3:4b"
-        return httpx.Response(200, json={"response": '{"plate_text":"GJ05CD7777","confidence":0.6}', "model": "gemma3:4b"})
+        assert payload["model"] == "gemma4:31b"
+        return httpx.Response(
+            200,
+            json={"message": {"content": '{"plate_text":"GJ05CD7777","confidence":0.6}'}, "model": "gemma4:31b"},
+        )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     read = infer_bgr(np.zeros((80, 160, 3), dtype=np.uint8), client=client)
     assert read.plate_norm == "GJ05CD7777"
-    assert read.model_id == "ollama:gemma3:4b"
+    assert read.model_id == "ollama:gemma4:31b"
+
+
+def test_cloud_404_retries_next_model(monkeypatch):
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_enabled", True)
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "https://ollama.com")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "unit-ollama-cloud-key")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_model", "gemma3:4b")
+    monkeypatch.setattr("app.services.ollama_vision._cloud_disabled_reason", "")
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        seen.append(payload["model"])
+        if payload["model"] != "gemma4:31b":
+            return httpx.Response(404, json={"error": "model not found"})
+        return httpx.Response(
+            200,
+            json={"message": {"content": '{"plate_text":"GJ01AB1234","confidence":0.8}'}, "model": "gemma4:31b"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    read = infer_bgr(np.zeros((80, 160, 3), dtype=np.uint8), client=client, model="missing-model")
+    assert seen[0] == "missing-model"
+    assert "gemma4:31b" in seen
+    assert read.plate_norm == "GJ01AB1234"
+
+
+def test_retired_gemma3_maps_to_cloud_default(monkeypatch):
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "https://ollama.com")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "k")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_model", "gemma3:4b")
+    assert resolve_vision_model() == "gemma4:31b"
 
 
 def test_api_key_not_returned_in_status(monkeypatch):

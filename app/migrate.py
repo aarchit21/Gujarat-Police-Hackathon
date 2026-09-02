@@ -36,6 +36,7 @@ CAMERA_COLUMNS = {
     "active_protocol": ("VARCHAR(16) DEFAULT ''", "VARCHAR(16) DEFAULT ''"),
     "measured_worker_fps": ("DOUBLE PRECISION", "REAL"),
     "measured_at": ("TIMESTAMPTZ", "DATETIME"),
+    "coords_source": ("VARCHAR(24) DEFAULT ''", "VARCHAR(24) DEFAULT ''"),
 }
 
 SIGHTING_COLUMNS = {
@@ -49,6 +50,11 @@ SIGHTING_COLUMNS = {
     "bbox_h": ("INTEGER", "INTEGER"),
     "frame_width": ("INTEGER", "INTEGER"),
     "frame_height": ("INTEGER", "INTEGER"),
+    "vehicle_type": ("VARCHAR(32) DEFAULT ''", "VARCHAR(32) DEFAULT ''"),
+    "vehicle_make": ("VARCHAR(40) DEFAULT ''", "VARCHAR(40) DEFAULT ''"),
+    "vehicle_model": ("VARCHAR(40) DEFAULT ''", "VARCHAR(40) DEFAULT ''"),
+    "vehicle_color": ("VARCHAR(40) DEFAULT ''", "VARCHAR(40) DEFAULT ''"),
+    "vehicle_json": ("JSONB", "TEXT DEFAULT ''"),
 }
 
 INDEX_SQL = [
@@ -119,10 +125,53 @@ def _try_postgis(engine: Engine) -> bool:
         return False
 
 
+def _postgres_vehicle_jsonb(engine: Engine) -> bool:
+    if _dialect(engine) != "postgresql":
+        return False
+    try:
+        with engine.begin() as conn:
+            col = conn.execute(
+                text(
+                    """
+                    SELECT data_type FROM information_schema.columns
+                    WHERE table_name='sightings' AND column_name='vehicle_json'
+                    """
+                )
+            ).scalar()
+            if col and col.lower() in {"text", "character varying"}:
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE sightings
+                        ALTER COLUMN vehicle_json TYPE jsonb
+                        USING CASE
+                          WHEN vehicle_json IS NULL OR vehicle_json = '' THEN NULL
+                          ELSE vehicle_json::jsonb
+                        END
+                        """
+                    )
+                )
+        return True
+    except Exception:
+        return False
+
+
+def _sqlite_empty_vehicle_json(engine: Engine) -> None:
+    if _dialect(engine) != "sqlite":
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE sightings SET vehicle_json = NULL WHERE vehicle_json IS NULL OR trim(vehicle_json) = ''"))
+    except Exception:
+        return
+
+
 def apply_migrations(engine: Engine) -> dict:
     added = []
     added.extend(_add_columns(engine, "cameras", CAMERA_COLUMNS))
     added.extend(_add_columns(engine, "sightings", SIGHTING_COLUMNS))
+    _postgres_vehicle_jsonb(engine)
+    _sqlite_empty_vehicle_json(engine)
     with engine.begin() as conn:
         for stmt in INDEX_SQL:
             try:

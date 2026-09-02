@@ -1,6 +1,7 @@
 """Discover cameras from GET INGEST_CATALOGUE_URL. Never construct stream URLs."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -24,6 +25,8 @@ DOCUMENTED_WHEP_PREFIX = "http://103.250.160.189:8889/stream/"
 DOCUMENTED_WHEP_SUFFIX = "/whep"
 DOCUMENTED_HLS_PREFIX = "https://cctv.corp8.cloud/"
 DOCUMENTED_HLS_SUFFIX = "/index.m3u8"
+# Gujarat centroid used only when cameras.json omits lat/lng. Not a surveyed site.
+PLACEHOLDER_CENTER = (22.3, 71.2)
 
 
 class CatalogueError(ValueError):
@@ -171,7 +174,7 @@ def parse_catalogue(payload: Any) -> list[dict]:
                 "name": str(item.get("name") or item.get("location") or cid),
                 "location": str(item.get("location") or item.get("city") or ""),
                 "codec": str(item.get("codec") or item.get("videoCodec") or stream.get("codec") or ""),
-                "live": bool(item.get("live") if item.get("live") is not None else item.get("isLive") or False),
+                "live": _catalogue_live_flag(item),
                 "width": _int(item.get("width") or stream.get("width")),
                 "height": _int(item.get("height") or stream.get("height")),
                 "reported_fps": _float(item.get("fps") or item.get("reported_fps") or stream.get("fps")),
@@ -240,15 +243,18 @@ def upsert_from_catalogue(db: Session, item: dict, *, synced_at: datetime | None
     if camera is None:
         camera = db.scalar(select(Camera).where(Camera.catalogue_camera_id == cat_id))
     created = camera is None
+    live = _catalogue_live_flag(item)
     if created:
+        lat, lng, coords_source = _resolve_coords(cam_id, item, None)
         has_rtsp = bool(item.get("rtsp_url"))
         camera = Camera(
             id=cam_id,
             name=item.get("name") or cam_id,
             department=item.get("department") or "government-catalogue",
             city=item.get("location") or "",
-            lat=item.get("lat") or 22.3,
-            lng=item.get("lng") or 71.2,
+            lat=lat,
+            lng=lng,
+            coords_source=coords_source,
             source_type="rtsp" if has_rtsp else ("hls" if item.get("hls_url") else "blocked"),
             source_uri="",
             hls_url="",
@@ -258,7 +264,7 @@ def upsert_from_catalogue(db: Session, item: dict, *, synced_at: datetime | None
             processing_mode="local_worker" if has_rtsp or item.get("hls_url") else "deferred",
             analytics_policy="on_demand",
             priority_class="C",
-            network_class="limited" if item.get("live") else "offline",
+            network_class="limited" if live else "offline",
             compute_target="local-host",
             analytics_active=False,
             decode_status="untested",
@@ -266,7 +272,13 @@ def upsert_from_catalogue(db: Session, item: dict, *, synced_at: datetime | None
         db.add(camera)
 
     camera.catalogue_camera_id = cat_id
-    camera.catalogue_live = bool(item.get("live"))
+    camera.catalogue_live = live
+    if live and (camera.network_class or "offline") == "offline":
+        camera.network_class = "limited"
+    lat, lng, coords_source = _resolve_coords(cam_id, item, camera)
+    camera.lat = lat
+    camera.lng = lng
+    camera.coords_source = coords_source
     camera.codec = item.get("codec") or camera.codec
     if item.get("width"):
         camera.width = item["width"]
@@ -358,6 +370,7 @@ def sync_catalogue(
             detail=json.dumps({"created": created, "updated": updated, "missing": missing, "seen": len(seen)}),
         )
     )
+    backfill_catalogue_display(db)
     db.commit()
     return {
         "ok": True,
@@ -380,6 +393,77 @@ def _state(db: Session, key: str, value: str, now: datetime) -> None:
     else:
         row.value = value
         row.updated_at = now
+
+
+def _catalogue_live_flag(item: dict) -> bool:
+    """cameras.json is currently id+name only. Listed ⇒ live unless explicitly false."""
+    if "live" in item and item.get("live") is not None:
+        return bool(item.get("live"))
+    if "isLive" in item and item.get("isLive") is not None:
+        return bool(item.get("isLive"))
+    return True
+
+
+def placeholder_coordinates(camera_id: str) -> tuple[float, float]:
+    """Stable unique offset across Gujarat. Not a surveyed camera site."""
+    digits = "".join(ch for ch in (camera_id or "") if ch.isdigit())
+    if digits:
+        n = int(digits)
+    else:
+        n = int(hashlib.md5((camera_id or "cam").encode("utf-8")).hexdigest()[:8], 16)
+    col = n % 6
+    row = (n // 6) % 6
+    lat = 21.5 + row * 0.45 + ((n * 17) % 10) * 0.012
+    lng = 69.7 + col * 0.55 + ((n * 13) % 10) * 0.012
+    return round(lat, 6), round(lng, 6)
+
+
+def _is_stacked_placeholder(lat, lng) -> bool:
+    if lat is None or lng is None:
+        return True
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except (TypeError, ValueError):
+        return True
+    if lat_f == 0.0 and lng_f == 0.0:
+        return True
+    return abs(lat_f - PLACEHOLDER_CENTER[0]) < 1e-9 and abs(lng_f - PLACEHOLDER_CENTER[1]) < 1e-9
+
+
+def _resolve_coords(cam_id: str, item: dict, existing: Camera | None) -> tuple[float, float, str]:
+    if item.get("lat") is not None and item.get("lng") is not None:
+        return float(item["lat"]), float(item["lng"]), "catalogue"
+    if existing is not None and (existing.coords_source or "") == "catalogue":
+        return existing.lat, existing.lng, "catalogue"
+    if existing is not None and not _is_stacked_placeholder(existing.lat, existing.lng):
+        source = existing.coords_source or "placeholder"
+        return existing.lat, existing.lng, source
+    lat, lng = placeholder_coordinates(cam_id)
+    return lat, lng, "placeholder"
+
+
+def backfill_catalogue_display(db: Session) -> int:
+    """Fix stacked centroid markers and live=false on id+name catalogue rows."""
+    changed = 0
+    rows = list(db.scalars(select(Camera).where(Camera.catalogue_camera_id.is_not(None))))
+    for cam in rows:
+        missing = "missing from latest catalogue" in (cam.status_reason or "")
+        if not missing and not cam.catalogue_live:
+            cam.catalogue_live = True
+            changed += 1
+        if not missing and (cam.network_class or "offline") == "offline":
+            cam.network_class = "limited"
+            changed += 1
+        if (cam.coords_source or "") != "catalogue" and (
+            cam.coords_source == "placeholder" or _is_stacked_placeholder(cam.lat, cam.lng)
+        ):
+            lat, lng = placeholder_coordinates(cam.id)
+            if cam.lat != lat or cam.lng != lng or cam.coords_source != "placeholder":
+                cam.lat, cam.lng = lat, lng
+                cam.coords_source = "placeholder"
+                changed += 1
+    return changed
 
 
 def _int(value) -> int | None:

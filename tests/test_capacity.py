@@ -81,3 +81,64 @@ def test_measure_sequential_limit_and_decode_status(db):
     assert cam01.width == 1920
     assert cam02.decode_status == "failed"
     assert cam02.analytics_active is False
+
+
+def test_measure_skips_already_ok_and_probes_untested(db):
+    add_camera(
+        db,
+        id="cam01",
+        source_type="rtsp",
+        source_uri="rtsp://x/cam01",
+        catalogue_camera_id="cam01",
+        processing_mode="local_worker",
+        decode_status="ok",
+    )
+    add_camera(
+        db,
+        id="cam05",
+        source_type="rtsp",
+        source_uri="rtsp://x/cam05",
+        catalogue_camera_id="cam05",
+        processing_mode="deferred",
+        decode_status="untested",
+    )
+    seen = []
+
+    def probe(url, timeout=12.0):
+        seen.append(url)
+        return {"ok": True, "frame": True, "width": 1280, "height": 720, "pts_ms": 10, "error": ""}
+
+    out = measure_government_decode(db, limit=1, probe_fn=probe)
+    assert seen == ["rtsp://x/cam05"]
+    assert out["decode_ok"] == ["cam05"]
+    assert "cam01" in (out.get("already_decode_ok") or [])
+    from app.models import Camera
+
+    assert db.get(Camera, "cam05").decode_status == "ok"
+
+
+def test_start_accessible_promotes_deferred_decode_ok(db):
+    add_camera(
+        db,
+        id="cam01",
+        source_type="rtsp",
+        source_uri="rtsp://x",
+        catalogue_camera_id="cam01",
+        processing_mode="deferred",
+        decode_status="ok",
+        priority_class="C",
+    )
+
+    class FakeMgr:
+        max_workers = 4
+
+        def start(self, _db, camera_id, actor="operator"):
+            from app.models import Camera
+
+            cam = _db.get(Camera, camera_id)
+            assert cam.processing_mode == "local_worker"
+            return {"ok": True, "state": "starting"}
+
+    out = start_accessible_workers(FakeMgr(), db)
+    assert out["started"] == ["cam01"]
+    assert "cam01" in (out.get("promoted") or [])

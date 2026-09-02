@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -56,6 +56,7 @@ class Camera(Base):
     active_protocol: Mapped[str] = mapped_column(String(16), default="")
     measured_worker_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
     measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    coords_source: Mapped[str] = mapped_column(String(24), default="")
 
     sightings: Mapped[list["Sighting"]] = relationship(back_populates="camera")
 
@@ -100,7 +101,7 @@ class Sighting(Base):
     plate_voted: Mapped[str] = mapped_column(String(32), default="")
     syntax_ok: Mapped[bool] = mapped_column(Boolean, default=False)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
-    model_id: Mapped[str] = mapped_column(String(80), default="tesseract-opencv-p0")
+    model_id: Mapped[str] = mapped_column(String(80), default="ollama-vision-p0")
     model_hash: Mapped[str] = mapped_column(String(64), default="unpinned")
     evidence_path: Mapped[str] = mapped_column(Text, default="")
     run_id: Mapped[str] = mapped_column(String(64), default="")
@@ -114,6 +115,11 @@ class Sighting(Base):
     bbox_h: Mapped[int | None] = mapped_column(Integer, nullable=True)
     frame_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     frame_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    vehicle_type: Mapped[str] = mapped_column(String(32), default="")
+    vehicle_make: Mapped[str] = mapped_column(String(40), default="")
+    vehicle_model: Mapped[str] = mapped_column(String(40), default="")
+    vehicle_color: Mapped[str] = mapped_column(String(40), default="")
+    vehicle_json: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
 
     camera: Mapped[Camera] = relationship(back_populates="sightings")
 

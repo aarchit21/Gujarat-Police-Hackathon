@@ -1,6 +1,6 @@
 """Render two short own-feed frame folders with a moving Indian plate.
 
-No FFmpeg required. High-contrast plates so Tesseract can actually read them.
+No FFmpeg required. High-contrast plates for the own-feed Ollama/demo path.
 """
 from __future__ import annotations
 

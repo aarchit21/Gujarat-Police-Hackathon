@@ -22,7 +22,7 @@ A camera uses one processing mode:
 | Mode | Meaning |
 |---|---|
 | `vendor_metadata` | Consume authorised ANPR/event metadata from the camera or VMS |
-| `local_worker` | OpenCV + Tesseract on this departmental/local host |
+| `local_worker` | OpenCV capture + Ollama vision ANPR on this host |
 | `remote_gpu` | Send **selected JPEG frames** to `REMOTE_INFERENCE_URL` |
 | `shared_regional` | Represented as a shared worker (same local path in P0) |
 | `central_on_demand` | Process only when an operator starts the worker |
@@ -96,7 +96,7 @@ Open http://127.0.0.1:8000
 
 Default operator token: `p0-operator` (override with `ADMIN_TOKEN`). Vendor ingest token: `p0-vendor` (`VENDOR_INGEST_TOKEN`).
 
-1. **Run own-feed analysis** — OpenCV + Tesseract on generated Ahmedabad and Surat frames.
+1. **Run own-feed analysis** — OpenCV frames + Ollama vision on generated Ahmedabad and Surat plates.
 2. Search `GJ01AB1234` — sightings, evidence crops, dashed inferred path.
 3. Review alerts (ack / confirm / reject). Coverage stays honest: only feeds that are actually being processed are `analytics_active`.
 
@@ -107,9 +107,9 @@ python scripts\verify_own_feed.py
 python -m pytest -q
 ```
 
-## Optional Ollama vision OCR
+## Ollama vision ANPR
 
-Tesseract remains the Day-1 local provider (`tesseract-opencv-p0`). If a **government RTSP/HLS** frame fails Indian plate syntax, the worker may call Ollama vision. Own-feed still uses Tesseract unless `OLLAMA_VISION_ON_OWN_FEED=true`.
+Tesseract is **not used**. Live and own-feed plate reads go through Ollama vision (`model_id=ollama:<model>`).
 
 **Local Ollama** (no API key):
 
@@ -127,28 +127,24 @@ $env:OLLAMA_VISION_ENABLED = "true"
 ```powershell
 $env:OLLAMA_URL = "https://ollama.com"
 $env:OLLAMA_API_KEY = "<your cloud key>"
-$env:OLLAMA_VISION_MODEL = "gemma3:4b"
+$env:OLLAMA_VISION_MODEL = "gemma4:31b"
 $env:OLLAMA_VISION_ENABLED = "true"
 ```
 
-If `OLLAMA_API_KEY` is set and `OLLAMA_URL` is still localhost, the app uses `https://ollama.com` automatically. Cloud requests send `Authorization: Bearer <key>`. Local requests send no key. `llava:*` is mapped to `gemma3:4b` on Cloud because LLaVA is not a Cloud-hosted model.
+If `OLLAMA_API_KEY` is set and `OLLAMA_URL` is still localhost, the app uses `https://ollama.com` automatically. Cloud requests send `Authorization: Bearer <key>`. Local requests send no key. Retired Cloud models (`gemma3:*`, `llava:*`) map to `gemma4:31b` (the Cloud vision model this account lists). Cloud vision uses `/api/chat`.
 
 Records use `model_id=ollama:<actual-model>`. The prompt never includes the watchlist. The key is never returned by `/api/health`. This is not YOLO, Awiros, or PP-OCRv5.
 
-## Local Tesseract/OpenCV provider
+## Local OpenCV + Ollama provider
 
-Day-1 path on this host:
-
-- OpenCV colour/contour plate localisation
-- Tesseract 5 at `C:\Program Files\Tesseract-OCR\tesseract.exe`
-- A–Z / 0–9 whitelist
+- OpenCV captures and crops the live frame (HUD masked; vehicle region zoomed)
+- Ollama Cloud (or local GPU Ollama) reads plate + vehicle attributes
 - Indian plate normalisation + GJ / Bharat-series syntax flag
-- Independent multi-frame character-consistency vote (not a patent implementation)
+- Independent multi-frame character-consistency vote
 - Exact normalised watchlist match
 - Evidence crop only
-- `model_id=tesseract-opencv-p0` plus a hash of the local provider file
 
-Awiros, PP-OCRv5 and YOLO are **candidates only**. They are not written into records unless that provider is actually installed and used.
+Awiros, PP-OCRv5, YOLO and Tesseract are **not** the live OCR path.
 
 ## Optional remote GPU provider
 
@@ -166,7 +162,7 @@ The worker sends **selected JPEG frames** (PTS-sampled), not an unrestricted liv
 {"plate_text":"GJ01AB1234","confidence":0.9,"model_id":"...","model_hash":"...","bbox":[x,y,w,h]}
 ```
 
-Production never invents a remote plate. Tests mock the HTTP endpoint. On failure the error is recorded; local Tesseract is used only when fallback is allowed.
+Production never invents a remote plate. Tests mock the HTTP endpoint. On failure the error is recorded; the frame is skipped.
 
 ## Vendor metadata path
 
@@ -291,7 +287,7 @@ The UI posts user-supplied assumptions (camera count, bitrate, target FPS, activ
 ## Known host limitations
 
 - Windows, Python 3.14, GTX 1650 — throughput is a measured hypothesis, not a statewide rating
-- Tesseract OCR quality is limited; this is the honest Day-1 provider
+- ANPR is Ollama vision; Tesseract is not used
 - No Node.js and no external FFmpeg executable on PATH at plan time
 - OpenCV may still use its internal FFmpeg backend for RTSP
 - Government catalogue credentials and a real remote GPU endpoint are external blockers

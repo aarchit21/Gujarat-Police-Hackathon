@@ -1,8 +1,4 @@
-"""Local ANPR: OpenCV plate-like crop + Tesseract OCR.
-
-Awiros / PaddleOCR / YOLO are candidates only. This provider records
-model_id=tesseract-opencv-p0 and must produce a real crop and raw string.
-"""
+"""OpenCV frame helpers for ANPR. Plate text is read by Ollama vision, not Tesseract."""
 from __future__ import annotations
 
 import hashlib
@@ -11,23 +7,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pytesseract
-from PIL import Image
 
 from app.config import settings
-from app.services.plates import normalize, syntax_ok
 
-pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
-
-TESS_WHITELIST = (
-    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
-    "-c load_system_dawg=0 -c load_freq_dawg=0"
-)
-TESS_CONFIGS = [
-    f"--oem 3 --psm 7 {TESS_WHITELIST}",
-    f"--oem 3 --psm 8 {TESS_WHITELIST}",
-]
-MODEL_ID = "tesseract-opencv-p0"
+MODEL_ID = "ollama-vision-p0"
 
 
 def local_model_hash() -> str:
@@ -64,6 +47,9 @@ def detect_plate_boxes(bgr: np.ndarray, min_width: int | None = None) -> list[tu
     scored: list[tuple[int, int, int, int, float]] = []
     for cnt in contours:
         x, y, bw, bh = cv2.boundingRect(cnt)
+        # CCTV HUD / timestamp overlays sit in the top band. Do not OCR them as plates.
+        if y < int(0.18 * h):
+            continue
         if bw < min_w or bh < 18 or bw > 0.72 * w:
             continue
         aspect = bw / max(bh, 1)
@@ -87,53 +73,56 @@ def _sharpness(crop: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def ocr_crop(crop_bgr: np.ndarray) -> tuple[str, float]:
-    if crop_bgr is None or crop_bgr.size == 0:
-        return "", 0.0
-    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.bilateralFilter(gray, 7, 40, 40)
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if bw.mean() < 127:
-        bw = cv2.bitwise_not(bw)
-    kernel = np.ones((2, 2), np.uint8)
-    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
-    img = Image.fromarray(bw)
-    best_raw, best_conf, best_norm_len = "", 0.0, -1
-    try:
-        for cfg in TESS_CONFIGS:
-            raw = pytesseract.image_to_string(img, config=cfg).strip()
-            data = pytesseract.image_to_data(img, config=cfg, output_type=pytesseract.Output.DICT)
-            confs = []
-            for conf in data.get("conf", []):
-                try:
-                    c = float(conf)
-                except (TypeError, ValueError):
-                    continue
-                if c >= 0:
-                    confs.append(c)
-            conf = (sum(confs) / len(confs) / 100.0) if confs else 0.0
-            n = normalize(raw)
-            score = (2 if syntax_ok(n) else 0) + len(n) + conf
-            if score > best_norm_len:
-                best_norm_len = score
-                best_raw, best_conf = raw, conf
-    except pytesseract.TesseractNotFoundError:
-        return "", 0.0
-    return best_raw, best_conf
+def mask_hud(bgr: np.ndarray) -> np.ndarray:
+    """Blank channel-name / timestamp bars so OCR/vision do not read CSITMS/PTZ/clock."""
+    if bgr is None or getattr(bgr, "size", 0) == 0:
+        return bgr
+    out = bgr.copy()
+    h, w = out.shape[:2]
+    out[: max(1, int(0.12 * h)), :] = 0
+    out[max(0, int(0.88 * h)) :, :] = 0
+    return out
 
 
-def read_frame(bgr: np.ndarray) -> PlateRead:
-    boxes = detect_plate_boxes(bgr)
-    if not boxes:
-        return PlateRead("", "", False, 0.0, None, None)
-    x, y, w, h, det_score = boxes[0]
-    pad = 4
-    crop = bgr[max(0, y - pad) : y + h + pad, max(0, x - pad) : x + w + pad].copy()
-    raw, ocr_conf = ocr_crop(crop)
-    norm = normalize(raw)
-    conf = float(min(1.0, 0.4 * det_score + 0.6 * ocr_conf))
-    return PlateRead(raw, norm, syntax_ok(norm), conf, crop, (x, y, w, h))
+def prepare_live_anpr_frame(bgr: np.ndarray) -> np.ndarray:
+    """Zoom the strongest vehicle-like region on a wide PTZ view, else HUD-masked full frame."""
+    if bgr is None or getattr(bgr, "size", 0) == 0:
+        return bgr
+    h, w = bgr.shape[:2]
+    y0, y1 = int(0.12 * h), int(0.90 * h)
+    region = bgr[y0:y1, :]
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, hot = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
+    edges = cv2.Canny(blur, 40, 120)
+    comb = cv2.dilate(cv2.bitwise_or(hot, edges), np.ones((9, 15), np.uint8))
+    contours, _ = cv2.findContours(comb, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    best_area = 0
+    rh, rw = region.shape[:2]
+    for cnt in contours:
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        area = bw * bh
+        if bw < 48 or bh < 28 or area < 0.004 * rw * rh or area > 0.5 * rw * rh:
+            continue
+        if area > best_area:
+            best_area = area
+            best = (x, y + y0, bw, bh)
+    if best is None:
+        return mask_hud(bgr)
+    x, y, bw, bh = best
+    pad_x, pad_y = int(bw * 0.2), int(bh * 0.45)
+    x0 = max(0, x - pad_x)
+    y0b = max(0, y - pad_y)
+    x1 = min(w, x + bw + pad_x)
+    y1b = min(h, y + bh + pad_y + int(bh * 0.5))
+    crop = bgr[y0b:y1b, x0:x1]
+    if crop.size == 0:
+        return mask_hud(bgr)
+    if crop.shape[1] < 360:
+        scale = 360.0 / max(crop.shape[1], 1)
+        crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
+    return crop
 
 
 def load_bgr(path: Path) -> np.ndarray | None:

@@ -19,11 +19,14 @@ from app.models import Alert, AuditEvent, Camera, Sighting, WatchlistEntry
 from app.security import evidence_relpath_is_safe, redact_url
 from app.services.activity import cameras_active_at
 from app.services.capacity import capacity_snapshot, measure_government_decode, start_accessible_workers
-from app.services.catalogue import sync_catalogue
+from app.services.catalogue import backfill_catalogue_display, sync_catalogue
 from app.services.demo import autostart_if_configured
+from app.services.snapshot import grab_snapshot
 from app.services.cost import estimate as estimate_cost
 from app.services.coverage import coverage
 from app.services.ollama_vision import vision_status
+from app.services.serialize import ist_label, parse_vehicle_blob, utc_iso
+from app.services.vehicle_event import build_vehicle_event, is_recordable_plate
 from app.services.match import observed_plates, rematch_watchlist_entry
 from app.services.pipeline import analyze_camera
 from app.services.plates import normalize
@@ -43,6 +46,8 @@ async def lifespan(_app: FastAPI):
     init_db()
     db = SessionLocal()
     try:
+        backfill_catalogue_display(db)
+        db.commit()
         autostart_if_configured(manager, db)
     finally:
         db.close()
@@ -136,7 +141,7 @@ def health(db: Session = Depends(get_db)):
         "architecture": settings.architecture,
         "solo_p0": True,
         "analysis_fps_hypothesis": settings.analysis_fps,
-        "tesseract": settings.tesseract_cmd,
+        "tesseract": "disabled",
         "database": database_status(),
         "remote_inference_configured": bool(settings.remote_inference_url),
         "ollama_vision": vision_status(),
@@ -301,12 +306,61 @@ def api_observed_plates(db: Session = Depends(get_db)):
     return observed_plates(db)
 
 
+@app.get("/api/vehicle-events")
+def list_vehicle_events(
+    limit: int = Query(default=50, ge=1, le=500),
+    valid_only: bool = True,
+    db: Session = Depends(get_db),
+):
+    rows = list(db.scalars(select(Sighting).order_by(Sighting.source_time)))
+    records = []
+    rejected = []
+    for s in rows:
+        payload = parse_vehicle_blob(getattr(s, "vehicle_json", None))
+        if payload is None:
+            payload = build_vehicle_event(camera=s.camera, sighting=s)
+        if is_recordable_plate(s.plate_norm):
+            records.append(payload)
+        else:
+            rejected.append(
+                {
+                    "plate": s.plate_norm or s.plate_raw,
+                    "camera_id": s.camera_id,
+                    "observed_at": utc_iso(s.source_time),
+                    "observed_at_ist": ist_label(s.source_time),
+                    "provider": s.model_id or s.provider,
+                    "reason": "overlay or not an Indian plate",
+                }
+            )
+    empty_reason = ""
+    if not records:
+        last = rejected[-1] if rejected else None
+        empty_reason = (
+            "No valid vehicle JSON yet. A record is stored only when Ollama reads an Indian plate "
+            "(e.g. GJ01AB1234). Tesseract is not used."
+            + (f" Last discarded {last['plate']} on {last['camera_id']}." if last else "")
+        )
+    return {
+        "records": records[-limit:],
+        "valid_count": len(records),
+        "rejected_overlay": rejected[-12:],
+        "empty_reason": empty_reason,
+        "ollama": vision_status(),
+    }
+
+
 @app.get("/api/sightings")
-def list_sightings(plate: str | None = None, db: Session = Depends(get_db)):
+def list_sightings(
+    plate: str | None = None,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
     rows = list(db.scalars(select(Sighting).order_by(Sighting.source_time)))
     if plate:
         key = normalize(plate)
         rows = [s for s in rows if key in plate_keys(s)]
+    if limit:
+        rows = rows[-limit:]
     return [sighting_json(s) for s in rows]
 
 
@@ -550,6 +604,30 @@ def get_evidence(
     db.add(AuditEvent(actor=actor, action="evidence_access", detail=rel[:200]))
     db.commit()
     return FileResponse(path)
+
+
+@app.get("/api/cameras/{camera_id}/snapshot")
+def camera_snapshot(
+    camera_id: str,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    camera = db.get(Camera, camera_id)
+    if camera is None:
+        raise HTTPException(404, "camera not found")
+    result = grab_snapshot(camera)
+    if not result.get("ok") or not result.get("jpeg"):
+        raise HTTPException(503, result.get("error") or "no snapshot")
+    db.add(AuditEvent(actor=actor, action="snapshot", detail=camera_id))
+    db.commit()
+    return Response(
+        content=result["jpeg"],
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Snapshot-Source": str(result.get("source") or ""),
+        },
+    )
 
 
 @app.post("/api/cameras/{camera_id}/preview")

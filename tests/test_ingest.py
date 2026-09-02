@@ -163,9 +163,12 @@ def test_protected_hls_credential_stays_server_side(db):
     cam = add_camera(db, id="cam01", hls_url="https://cctv.corp8.cloud/cam01/index.m3u8", analytics_active=False)
     mgr = WorkerManager(max_workers=1)
     out = mgr.start_preview(cam, "hls")
-    assert out["ok"] is False
-    assert out.get("preview_blocked") is True
-    assert "token" not in (out.get("error") or "").lower()
+    assert out["ok"] is True
+    assert out["protocol"] == "snapshot"
+    assert "m3u8" not in (out.get("url") or "")
+    assert "cctv.corp8.cloud" not in (out.get("url") or "")
+    assert "token" not in str(out).lower()
+    assert out.get("hls_not_sent_to_browser") is True
     assert cam.analytics_active is False
 
 

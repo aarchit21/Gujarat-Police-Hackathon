@@ -14,9 +14,10 @@ from app.database import SessionLocal
 from app.models import AuditEvent, Camera
 from app.services.activity import close_activity, open_activity
 from app.security import hls_requires_server_credential, redact_url
-from app.services.ingest import CaptureRegistry, SourceOpenError, diagnostics, open_video_source
+from app.services.ingest import CaptureRegistry, SourceOpenError, diagnostics, open_video_source, rtsp_url_for
 from app.services.pipeline import FrameProcessor, iter_camera_frames, process_frame_iter
 from app.services.processing import select_processing_route
+from app.services.snapshot import maybe_save_live_preview
 from app.services.timing import backoff_seconds
 
 PRIORITY_RANK = {"A": 0, "B": 1, "C": 2, "D": 3}
@@ -98,21 +99,31 @@ class WorkerManager:
         protocol = protocol.lower()
         if protocol == "whep":
             url = camera.whep_url
-        elif protocol == "hls":
+        elif protocol in {"hls", "snapshot"}:
             url = camera.hls_url
         else:
-            return {"ok": False, "error": "protocol must be whep or hls"}
-        if not url:
-            return {"ok": False, "error": f"no {protocol} URL on camera; RTSP is not exposed to the browser"}
-        if protocol == "hls" and hls_requires_server_credential(url):
+            return {"ok": False, "error": "protocol must be whep, hls, or snapshot"}
+        if protocol == "snapshot" or (protocol == "hls" and url and hls_requires_server_credential(url)):
+            with self._lock:
+                self._previews[camera.id] = PreviewState(
+                    camera_id=camera.id,
+                    protocol="snapshot",
+                    url="",
+                    opened_at=datetime.now(timezone.utc).isoformat(),
+                )
             return {
-                "ok": False,
-                "preview_active": False,
+                "ok": True,
+                "preview_active": True,
                 "analytics_active": bool(camera.analytics_active),
-                "protocol": protocol,
-                "preview_blocked": True,
-                "error": "protected HLS credential remains server-side; browser preview blocked pending a service credential or signed URL",
+                "protocol": "snapshot",
+                "snapshot": True,
+                "url": f"/api/cameras/{camera.id}/snapshot",
+                "preview_blocked": False,
+                "hls_not_sent_to_browser": True,
+                "note": "HLS credential stays server-side. Operator snapshot uses the server-side feed.",
             }
+        if not url:
+            return {"ok": False, "error": f"no {protocol} URL on camera; RTSP is not exposed to the browser — use Live frame"}
         with self._lock:
             self._previews[camera.id] = PreviewState(
                 camera_id=camera.id,
@@ -137,6 +148,16 @@ class WorkerManager:
         camera = db.get(Camera, camera_id)
         if camera is None:
             return {"ok": False, "error": "unknown camera"}
+        if camera.processing_mode == "deferred":
+            has_source = bool(
+                (camera.source_type in {"image_dir", "file"} and camera.source_uri)
+                or rtsp_url_for(camera)
+                or camera.hls_url
+            )
+            if has_source:
+                camera.processing_mode = "local_worker"
+                camera.analytics_policy = "continuous"
+                db.add(AuditEvent(actor=actor, action="worker_promote", detail=f"{camera_id} deferred->local_worker"))
         route = select_processing_route(camera)
         if camera.processing_mode == "vendor_metadata":
             camera.analytics_active = False
@@ -152,8 +173,13 @@ class WorkerManager:
         with self._lock:
             if camera_id in self._threads:
                 return {"ok": True, "camera_id": camera_id, "state": "already_running"}
+            needs_capture = camera.source_type in {"rtsp", "hls", "onvif"}
             slots_full = len(self._threads) >= self.max_workers
-            captures_full = self.registry.count() >= self.registry.max_open and camera_id not in self.registry.owners()
+            captures_full = (
+                needs_capture
+                and self.registry.count() >= self.registry.max_open
+                and camera_id not in self.registry.owners()
+            )
             if slots_full or captures_full:
                 if camera_id not in self._queue:
                     self._queue.append(camera_id)
@@ -162,7 +188,7 @@ class WorkerManager:
                 db.add(AuditEvent(actor=actor, action="worker_queued", detail=camera_id))
                 db.commit()
                 return {"ok": True, "camera_id": camera_id, "state": "queued", "analytics_active": False}
-            if not self.registry.try_acquire(camera_id):
+            if needs_capture and not self.registry.try_acquire(camera_id):
                 if camera_id not in self._queue:
                     self._queue.append(camera_id)
                 camera.analytics_active = False
@@ -352,6 +378,7 @@ def run_live_loop(
                         continue
                     break
                 got_frame = True
+                maybe_save_live_preview(camera.id, frame)
                 camera.decode_status = "ok"
                 camera.status = "connected"
                 camera.status_reason = f"decoding via {opened.protocol}"

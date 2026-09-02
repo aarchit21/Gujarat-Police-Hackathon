@@ -50,7 +50,7 @@ def select_processing_route(camera: Camera, *, remote_url: str | None = None) ->
     if mode in {"local_worker", "shared_regional"}:
         if _has_local_source(camera):
             label = "shared_regional" if mode == "shared_regional" else "local_worker"
-            return _route("local_worker", label, "local OpenCV/Tesseract worker")
+            return _route("local_worker", label, "local OpenCV + Ollama vision worker")
         return _route("deferred", "deferred", "local_worker selected but no decodable local source")
 
     if mode == "central_on_demand":

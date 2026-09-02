@@ -47,11 +47,36 @@ def runnable_cameras(db: Session, *, decode_ok_only: bool = True) -> list[Camera
         if decode_ok_only and cam.source_type in {"rtsp", "hls", "onvif"} and cam.decode_status != "ok":
             continue
         out.append(cam)
-    out.sort(key=lambda c: (PRIORITY_RANK.get(c.priority_class or "D", 9), c.id))
+    out.sort(
+        key=lambda c: (
+            0 if camera_origin(c) == "government_catalogue" and c.source_type in {"rtsp", "hls", "onvif"} else 1,
+            PRIORITY_RANK.get(c.priority_class or "D", 9),
+            c.id,
+        )
+    )
     return out
 
 
+def promote_decode_ok_cameras(db: Session) -> list[str]:
+    promoted = []
+    for cam in db.scalars(select(Camera)):
+        if cam.decode_status != "ok":
+            continue
+        if cam.processing_mode in {"deferred", "", None}:
+            cam.processing_mode = "local_worker"
+            cam.analytics_policy = "continuous"
+            if camera_origin(cam) == "government_catalogue" and (cam.priority_class or "D") in {"C", "D", ""}:
+                cam.priority_class = "B"
+            promoted.append(cam.id)
+        cam.analytics_active = False
+    if promoted:
+        db.add(AuditEvent(action="demo_promote", detail=",".join(promoted)))
+    db.commit()
+    return promoted
+
+
 def start_accessible_workers(manager, db: Session, *, actor: str = "operator", decode_ok_only: bool = True) -> dict:
+    promoted = promote_decode_ok_cameras(db)
     selected = runnable_cameras(db, decode_ok_only=decode_ok_only)
     started, queued, skipped, failed = [], [], [], []
     for cam in selected:
@@ -78,6 +103,7 @@ def start_accessible_workers(manager, db: Session, *, actor: str = "operator", d
         "decode_ok_only": decode_ok_only,
         "max_concurrent": manager.max_workers,
         "candidate_count": len(selected),
+        "promoted": promoted,
         "started": started,
         "queued": queued,
         "failed": failed,
@@ -101,10 +127,15 @@ def measure_government_decode(
         for c in db.scalars(select(Camera).order_by(Camera.id))
         if camera_origin(c) == "government_catalogue" and rtsp_url_for(c)
     ]
+    untested = [c for c in gov if (c.decode_status or "untested") == "untested"]
+    failed = [c for c in gov if c.decode_status == "failed"]
+    already_ok = [c.id for c in gov if c.decode_status == "ok"]
+    queue = untested + failed
+    batch = queue[:cap]
     tested = []
     ok_ids = []
     wall = time.monotonic()
-    for cam in gov[:cap]:
+    for cam in batch:
         url = rtsp_url_for(cam)
         t0 = time.monotonic()
         result = probe(url, timeout=timeout)
@@ -173,13 +204,20 @@ def measure_government_decode(
         "decode_ok_count": len(ok_ids),
         "tested_count": len(tested),
         "limit": cap,
-        "catalogue_remaining_untested": max(0, len(gov) - cap),
+        "already_decode_ok": already_ok,
+        "catalogue_remaining_untested": sum(
+            1 for c in gov if (c.decode_status or "untested") == "untested"
+        ),
         "measured_safe_fps": host_fps,
         "requested_fps_hypothesis": requested,
         "recommended_target_fps": recommended,
         "sampling_reduced": recommended + 1e-9 < requested,
         "elapsed_s": round(elapsed_all, 3),
-        "disclaimer": "Sequential decode probe only. Not an 80,000-camera test. Untested catalogue cameras stay idle.",
+        "disclaimer": (
+            "Sequential decode probe of the next untested cameras only. "
+            "Not an 80,000-camera test. Repeat Measure to walk through the rest. "
+            "Decode ok is not a running worker."
+        ),
     }
 
 

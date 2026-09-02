@@ -19,7 +19,7 @@ from app.services.network_check import host_network_report  # noqa: E402
 
 def main() -> None:
     print("python", sys.version)
-    print("tesseract_cmd", settings.tesseract_cmd, Path(settings.tesseract_cmd).exists())
+    print("tesseract", "disabled (ANPR is Ollama vision)")
     print("ffmpeg_executable", shutil.which("ffmpeg") or "NOT ON PATH (not required; OpenCV CAP_FFMPEG may still work)")
     print("node", shutil.which("node") or "NOT ON PATH (not required)")
     print("opencv", opencv_version())

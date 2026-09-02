@@ -9,6 +9,8 @@ const links = L.layerGroup().addTo(map);
 const routes = L.layerGroup().addTo(map);
 let previewCam = null;
 let hlsPlayer = null;
+let snapshotTimer = null;
+let didFitCameras = false;
 let lastCameras = [];
 
 function headers(json) {
@@ -52,6 +54,16 @@ function ollamaVisionText(h) {
   return `${where} · ${live}${model ? " · " + model : ""}`;
 }
 
+function formatWhen(iso) {
+  if (!iso) return "";
+  let text = String(iso);
+  if (/IST$/.test(text)) return text;
+  if (!/Z$|[+-]\d\d:\d\d$/.test(text)) text += "Z";
+  const d = new Date(text);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false }) + " IST";
+}
+
 function evidenceUrl(path) {
   if (!path) return "";
   return `/api/evidence?rel=${encodeURIComponent(path)}&token=${encodeURIComponent(TOKEN)}`;
@@ -90,7 +102,7 @@ async function loadCoverage() {
     .join("");
   const demo = document.getElementById("demoStrip");
   if (demo) {
-    demo.textContent = `Demo · analytics ${h.analytics_active_count || 0} running · last sighting ${h.last_sighting_plate || "—"} @ ${h.last_sighting_camera || "—"} ${h.last_sighting_at || ""} · ${ollamaVisionText(h)}`;
+    demo.textContent = `Demo · analytics ${h.analytics_active_count || 0} running · last sighting ${h.last_sighting_plate || "—"} @ ${h.last_sighting_camera || "—"} ${formatWhen(h.last_sighting_at)} · ${ollamaVisionText(h)}`;
   }
 }
 
@@ -111,20 +123,29 @@ function renderLedger() {
   if (!body) return;
   markers.clearLayers();
   body.innerHTML = "";
+  const pts = [];
   lastCameras
     .filter((c) => filter === "all" || cameraBucket(c) === filter)
     .forEach((c) => {
-    const color = c.analytics_active ? "#2f6f4e" : c.status === "onboarded" || c.status === "connected" ? "#c4a35a" : "#9b2c2c";
-    L.circleMarker([c.lat, c.lng], { radius: 6, color, fillOpacity: 0.85 })
-      .bindPopup(
-        `<b>${c.id}</b> · ${c.origin || ""}<br>${c.city} · ${c.department}<br>priority ${c.priority_class} · ${c.processing_mode} · worker ${c.worker_state || "idle"}<br>compute ${c.compute_target || "—"} · net ${c.network_class}<br>cat live ${c.catalogue_live} · decode ${c.decode_status}<br>codec ${c.codec || "unspecified"} · size ${resolutionText(c)}<br>protocol ${c.active_protocol || "—"} · pts ${c.last_pts_ms ?? "—"}<br>reconnects ${c.reconnect_count} · preview ${c.preview_active}<br>${c.status}: ${c.status_reason || ""}`
-      )
-      .addTo(markers);
+    const color = c.analytics_active ? "#2f6f4e" : c.catalogue_live ? "#2c5282" : c.status === "onboarded" || c.status === "connected" ? "#c4a35a" : "#9b2c2c";
+    if (c.lat != null && c.lng != null && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng))) {
+      pts.push([c.lat, c.lng]);
+      const marker = L.circleMarker([c.lat, c.lng], { radius: 7, color, fillOpacity: 0.85 })
+        .bindPopup(
+          `<b>${c.id}</b> · ${c.origin || ""}<br>${c.city || "location omitted"} · ${c.department}<br>${c.coords_are_placeholder ? "placeholder map position (catalogue omitted lat/lng)<br>" : ""}cat live ${c.catalogue_live} · decode ${c.decode_status}<br>${c.status}: ${c.status_reason || ""}`
+        )
+        .addTo(markers);
+      marker.on("click", () => showCamera(c));
+    }
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${c.id}</td><td>${c.origin || ""}</td><td>${c.priority_class}</td><td>${c.processing_mode}</td><td class="${statusClass(c.status)}">${c.status}</td><td>${c.catalogue_live}</td><td>${c.decode_status}</td><td>${c.active_protocol || "—"}</td><td>${resolutionText(c)}</td><td>${c.analytics_active ? "yes" : "no"} / prev ${c.preview_active ? "yes" : "no"}</td>`;
     tr.onclick = () => showCamera(c);
     body.appendChild(tr);
   });
+  if (!didFitCameras && pts.length) {
+    map.fitBounds(pts, { padding: [40, 40], maxZoom: 10 });
+    didFitCameras = true;
+  }
 }
 
 function showCamera(c) {
@@ -135,9 +156,11 @@ function showCamera(c) {
       <div class="muted">${c.department} · ${c.city || ""} · last frame ${c.last_frame_at || "—"}</div>
       <div class="muted">origin ${c.origin || "—"} · codec ${c.codec || "unspecified"} · size ${resolutionText(c)} · pts ${c.last_pts_ms ?? "—"} · reconnects ${c.reconnect_count}</div>
       <div class="muted">last error: ${c.last_error || "none"}</div>
-      <div class="muted">${c.hls_preview_blocked ? "HLS preview blocked (credential stays server-side)." : ""}</div>
+      <div class="muted">${c.coords_are_placeholder ? "Map position is a placeholder — catalogue omitted lat/lng." : ""}</div>
+      <div class="muted">${c.hls_preview_blocked ? "HLS stays server-side. Use Live frame." : ""}</div>
       <div class="row" style="margin-top:6px">
-        <button data-prev="hls">HLS preview</button>
+        <button data-prev="snapshot">Live frame</button>
+        <button class="secondary" data-prev="hls">HLS preview</button>
         <button class="secondary" data-prev="whep">WHEP preview</button>
         <button class="secondary" data-start="${c.id}">Start worker</button>
         <button class="secondary" data-analyze="${c.id}">Bounded live analyze</button>
@@ -167,13 +190,52 @@ function showCamera(c) {
   };
 }
 
+function stopSnapshotTimer() {
+  if (snapshotTimer) {
+    clearInterval(snapshotTimer);
+    snapshotTimer = null;
+  }
+}
+
+function showSnapshotPreview(c, note) {
+  previewCam = c.id;
+  const box = document.getElementById("previewBox");
+  box.classList.remove("hidden");
+  document.getElementById("previewTitle").textContent = `${c.id} live frame`;
+  const video = document.getElementById("previewVideo");
+  const img = document.getElementById("previewImage");
+  video.classList.add("hidden");
+  video.removeAttribute("src");
+  img.classList.remove("hidden");
+  const load = () => {
+    img.src = `/api/cameras/${encodeURIComponent(c.id)}/snapshot?token=${encodeURIComponent(TOKEN)}&t=${Date.now()}`;
+  };
+  img.onerror = () => {
+    document.getElementById("previewNote").textContent =
+      "No live frame yet. Start a worker or bounded analyze first if RTSP is slow to open.";
+  };
+  load();
+  stopSnapshotTimer();
+  snapshotTimer = setInterval(load, 4000);
+  document.getElementById("previewNote").textContent =
+    note || "Operator snapshot from the server-side feed. Not a VMS archive. HLS is not sent to the browser.";
+}
+
 async function openPreview(c, protocol) {
   const out = await j(`/api/cameras/${c.id}/preview`, {
     method: "POST",
     body: JSON.stringify({ protocol }),
   });
   if (out.preview_blocked || !out.ok) {
+    if (protocol !== "snapshot") {
+      showSnapshotPreview(c, out.error || "Stream preview unavailable; trying live frame.");
+      return;
+    }
     alert(out.error || "preview blocked");
+    return;
+  }
+  if (out.protocol === "snapshot" || out.snapshot) {
+    showSnapshotPreview(c, out.note);
     return;
   }
   previewCam = c.id;
@@ -181,6 +243,9 @@ async function openPreview(c, protocol) {
   box.classList.remove("hidden");
   document.getElementById("previewTitle").textContent = `${c.id} ${out.protocol} preview`;
   const video = document.getElementById("previewVideo");
+  const img = document.getElementById("previewImage");
+  img.classList.add("hidden");
+  video.classList.remove("hidden");
   if (hlsPlayer) {
     hlsPlayer.destroy();
     hlsPlayer = null;
@@ -195,6 +260,7 @@ async function openPreview(c, protocol) {
 }
 
 async function closePreview() {
+  stopSnapshotTimer();
   if (previewCam) {
     try {
       await j(`/api/cameras/${previewCam}/preview/stop`, { method: "POST" });
@@ -208,6 +274,11 @@ async function closePreview() {
     hlsPlayer = null;
   }
   document.getElementById("previewVideo").removeAttribute("src");
+  const img = document.getElementById("previewImage");
+  if (img) {
+    img.removeAttribute("src");
+    img.classList.add("hidden");
+  }
   document.getElementById("previewBox").classList.add("hidden");
 }
 
@@ -286,7 +357,73 @@ async function loadWatchlist() {
   });
 }
 
+function locationText(row) {
+  if (row.location) return row.location;
+  if (row.city) return row.city;
+  if (row.lat != null && row.lng != null) return `${Number(row.lat).toFixed(4)}, ${Number(row.lng).toFixed(4)}`;
+  return "location omitted";
+}
+
+function vehicleRowCard(row, extraHtml) {
+  const veh = row.vehicle || {};
+  const number = veh.number || row.plate_norm || row.plate || "—";
+  const type = veh.type || row.vehicle_type || "unknown";
+  const color = veh.color || row.vehicle_color || "—";
+  const when = row.observed_at_ist || row.source_time_ist || formatWhen(row.observed_at || row.source_time);
+  const cam = row.camera_id || "—";
+  const loc = locationText(row);
+  return `<div class="card">
+    <div class="vehicle-grid">
+      <div><span class="k">Vehicle number</span><b>${number}</b></div>
+      <div><span class="k">Vehicle type</span>${type}</div>
+      <div><span class="k">Colour</span>${color}</div>
+      <div><span class="k">Date / time (IST)</span>${when}</div>
+      <div><span class="k">Camera</span>${cam}</div>
+      <div><span class="k">Location</span>${loc}</div>
+    </div>
+    ${extraHtml || ""}
+  </div>`;
+}
+
+async function loadLiveVehicles() {
+  const el = document.getElementById("liveVehicles");
+  if (!el) return;
+  const data = await j("/api/vehicle-events?limit=20&valid_only=true");
+  const rows = Array.isArray(data) ? data : data.records || [];
+  if (!rows.length) {
+    el.className = "card muted";
+    const reason = (data && data.empty_reason) || "No valid vehicle records yet.";
+    const ollama = (data && data.ollama && data.ollama.label) || "";
+    el.textContent = reason + (ollama ? ` ${ollama}` : "");
+    return;
+  }
+  el.className = "";
+  el.innerHTML = rows.slice().reverse().map((r) => vehicleRowCard(r)).join("");
+}
+
+async function loadLiveSightings() {
+  const el = document.getElementById("liveSightings");
+  if (!el) return;
+  const rows = await j("/api/sightings?limit=25");
+  if (!rows.length) {
+    el.className = "card muted";
+    el.textContent = "No persisted sightings yet.";
+    return;
+  }
+  el.className = "";
+  el.innerHTML = rows
+    .slice()
+    .reverse()
+    .map(
+      (s) =>
+        `<div class="card"><b>${s.plate_raw || s.plate_norm}</b> · ${s.camera_id} · ${s.syntax_ok ? "syntax ok" : "not a valid plate"}<div class="muted">${s.source_time_ist || formatWhen(s.source_time)} · ${s.model_id || ""} · conf ${(s.confidence || 0).toFixed(2)}</div></div>`
+    )
+    .join("");
+}
+
 async function loadAlerts() {
+  await loadLiveVehicles();
+  await loadLiveSightings();
   const alerts = await j("/api/alerts");
   const root = document.getElementById("alerts");
   root.innerHTML = "";
@@ -296,18 +433,28 @@ async function loadAlerts() {
   }
   alerts.forEach((a) => {
     const img = a.evidence_path ? `<img src="${evidenceUrl(a.evidence_path)}" alt="crop" />` : "";
-    const el = document.createElement("div");
-    el.className = "card";
-    el.innerHTML = `
-      <div><b>${a.plate_norm}</b> · ${a.match_type} · ${a.city || a.camera_id} · ${a.status}</div>
-      <div class="muted">${a.source_time || ""} · raw ${a.plate_raw || "—"} · voted ${a.plate_voted || "—"} · conf ${(a.confidence || 0).toFixed(2)} · ${a.model_id || ""}</div>
-      ${img}
+    const wrap = document.createElement("div");
+    wrap.innerHTML = vehicleRowCard(
+      {
+        vehicle: {
+          number: a.plate_norm,
+          type: a.vehicle_type || "unknown",
+          color: a.vehicle_color || "—",
+        },
+        observed_at_ist: a.source_time_ist || a.created_at_ist,
+        camera_id: a.camera_id,
+        location: a.location || a.city || a.camera_name,
+        lat: a.lat,
+        lng: a.lng,
+      },
+      `${img}<div class="muted" style="margin-top:8px">${a.status} · ${a.match_type}</div>
       <div class="row" style="margin-top:6px">
         <button data-id="${a.id}" data-s="acknowledged">Ack</button>
         <button class="secondary" data-id="${a.id}" data-s="confirmed">Confirm</button>
         <button class="secondary" data-id="${a.id}" data-s="rejected">Reject</button>
-      </div>`;
-    root.appendChild(el);
+      </div>`
+    );
+    root.appendChild(wrap.firstElementChild);
   });
   root.querySelectorAll("button[data-id]").forEach((btn) => {
     btn.onclick = async () => {
@@ -510,7 +657,7 @@ document.getElementById("btnMeasure").onclick = async () => {
   btn.textContent = "Measuring…";
   try {
     const out = await j("/api/capacity/measure", { method: "POST" });
-    alert(`Decode ok ${out.decode_ok_count}/${out.tested_count}. Measured ${out.measured_safe_fps} fps. Recommended ${out.recommended_target_fps} fps. ${out.disclaimer}`);
+    alert(`This batch: decode ok ${out.decode_ok_count}/${out.tested_count}. Already ok ${(out.already_decode_ok || []).length}. Remaining untested ${out.catalogue_remaining_untested}. Repeat Measure to test the next cameras. ${out.disclaimer}`);
     await refresh();
   } catch (err) {
     alert(String(err));
@@ -569,3 +716,9 @@ document.getElementById("dlCsv").onclick = (e) => {
 };
 
 refresh();
+setInterval(() => {
+  loadCoverage();
+  loadWorkers();
+  loadLiveVehicles();
+  loadLiveSightings();
+}, 4000);
