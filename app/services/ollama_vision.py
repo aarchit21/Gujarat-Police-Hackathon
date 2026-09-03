@@ -173,7 +173,7 @@ def encode_jpeg_b64(bgr: np.ndarray, max_width: int | None = None) -> str:
     if w > limit:
         scale = limit / float(w)
         frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     if not ok:
         raise OllamaVisionError("jpeg encode failed")
     return base64.b64encode(buf.tobytes()).decode("ascii")
@@ -341,11 +341,12 @@ def infer_vehicle(
     model: str | None = None,
 ) -> dict:
     """Vision-first vehicle record. Empty plate_norm means do not persist."""
-    gap = float(getattr(settings, "ollama_live_interval_seconds", 2.5) or 2.5)
+    gap = float(getattr(settings, "ollama_live_interval_seconds", 0.4) or 0.4)
     now = time.monotonic()
     if camera_id and now - _last_vehicle_infer.get(camera_id, 0.0) < gap:
         return {"plate_norm": "", "skipped": "throttled"}
-    if not _vehicle_lock.acquire(blocking=False):
+    wait = float(getattr(settings, "ollama_lock_wait_seconds", 25.0) or 25.0)
+    if not _vehicle_lock.acquire(timeout=max(1.0, wait)):
         return {"plate_norm": "", "skipped": "busy"}
     try:
         if camera_id:

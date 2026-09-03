@@ -86,6 +86,7 @@ async function loadCoverage() {
     ["Queued", h.queued_count],
     ["Gov feed", govFeedText(h)],
     ["Ollama vision", ollamaVisionText(h)],
+    ["YOLO", (h.yolo_detector && h.yolo_detector.label) || "—"],
     ["Measured fps", h.measured_safe_fps || (h.capacity && h.capacity.measured_safe_fps) || "—"],
     ["Recommended fps", h.recommended_target_fps || (h.capacity && h.capacity.recommended_target_fps) || "—"],
     ["Database", db.type],
@@ -95,6 +96,8 @@ async function loadCoverage() {
     ["Catalogue live", h.catalogue_live_count],
     ["Decode ok", h.decode_ok_count],
     ["HTTP", h.catalogue_last_http_status || "—"],
+    ["Hunt visited", (h.hunt && `${h.hunt.visited_count || 0}/${h.hunt.total || 0}`) || "—"],
+    ["Hunt vehicles", (h.hunt && h.hunt.vehicles_seen) ?? "—"],
     ["Review alerts", h.alerts_requiring_review],
     ["Snap-to-road", (h.map_match && h.map_match.provider) ? `OSM ${h.map_match.provider}` : "OSRM (free OSM)"],
   ]
@@ -103,6 +106,12 @@ async function loadCoverage() {
   const demo = document.getElementById("demoStrip");
   if (demo) {
     demo.textContent = `Demo · analytics ${h.analytics_active_count || 0} running · last sighting ${h.last_sighting_plate || "—"} @ ${h.last_sighting_camera || "—"} ${formatWhen(h.last_sighting_at)} · ${ollamaVisionText(h)}`;
+  }
+  const huntEl = document.getElementById("huntStrip");
+  if (huntEl) {
+    const hunt = h.hunt || {};
+    huntEl.textContent = hunt.label
+      || `Hunt ${hunt.enabled ? "on" : "idle"} · hunting ${hunt.hunting_count || 0}/${hunt.total || 30} · visited ${hunt.visited_count || 0}/${hunt.total || 30} · vehicles ${hunt.vehicles_seen || 0} · plates ${hunt.plates_read || 0}. 4 slots on this host, not 30 simultaneous decodes.`;
   }
 }
 
@@ -127,12 +136,12 @@ function renderLedger() {
   lastCameras
     .filter((c) => filter === "all" || cameraBucket(c) === filter)
     .forEach((c) => {
-    const color = c.analytics_active ? "#2f6f4e" : c.catalogue_live ? "#2c5282" : c.status === "onboarded" || c.status === "connected" ? "#c4a35a" : "#9b2c2c";
+    const color = c.analytics_active || c.worker_state === "running" ? "#2f6f4e" : c.last_hunted_at ? "#38a169" : c.catalogue_live ? "#2c5282" : c.status === "onboarded" || c.status === "connected" ? "#c4a35a" : "#9b2c2c";
     if (c.lat != null && c.lng != null && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng))) {
       pts.push([c.lat, c.lng]);
       const marker = L.circleMarker([c.lat, c.lng], { radius: 7, color, fillOpacity: 0.85 })
         .bindPopup(
-          `<b>${c.id}</b> · ${c.origin || ""}<br>${c.city || "location omitted"} · ${c.department}<br>${c.coords_are_placeholder ? "placeholder map position (catalogue omitted lat/lng)<br>" : ""}cat live ${c.catalogue_live} · decode ${c.decode_status}<br>${c.status}: ${c.status_reason || ""}`
+          `<b>${c.id}</b> · ${c.origin || ""}<br>${c.city || "location omitted"} · ${c.department}<br>${c.coords_are_placeholder ? "placeholder map position (catalogue omitted lat/lng)<br>" : ""}cat live ${c.catalogue_live} · decode ${c.decode_status}<br>hunting ${c.analytics_active ? "now" : "no"} · last hunted ${c.last_hunted_at_ist || "—"}<br>${c.status}: ${c.status_reason || ""}`
         )
         .addTo(markers);
       marker.on("click", () => showCamera(c));
@@ -366,7 +375,16 @@ function locationText(row) {
 
 function vehicleRowCard(row, extraHtml) {
   const veh = row.vehicle || {};
-  const number = veh.number || row.plate_norm || row.plate || "—";
+  const unread = veh.unreadable_reason || "";
+  const gemma = row.gemma || {};
+  const gemmaText = gemma.plate_text
+    ? `Gemma: ${gemma.plate_text}`
+    : gemma.skipped
+      ? `Gemma: ${gemma.skipped}`
+      : gemma.called
+        ? "Gemma: empty"
+        : "";
+  const number = veh.number || row.plate_norm || row.plate || (unread ? `unreadable (${unread})` : "—");
   const type = veh.type || row.vehicle_type || "unknown";
   const color = veh.color || row.vehicle_color || "—";
   const when = row.observed_at_ist || row.source_time_ist || formatWhen(row.observed_at || row.source_time);
@@ -380,6 +398,7 @@ function vehicleRowCard(row, extraHtml) {
       <div><span class="k">Date / time (IST)</span>${when}</div>
       <div><span class="k">Camera</span>${cam}</div>
       <div><span class="k">Location</span>${loc}</div>
+      ${gemmaText ? `<div><span class="k">Gemma</span>${gemmaText}</div>` : ""}
     </div>
     ${extraHtml || ""}
   </div>`;
@@ -388,7 +407,7 @@ function vehicleRowCard(row, extraHtml) {
 async function loadLiveVehicles() {
   const el = document.getElementById("liveVehicles");
   if (!el) return;
-  const data = await j("/api/vehicle-events?limit=20&valid_only=true");
+  const data = await j("/api/vehicle-events?limit=20&valid_only=false&include_unreadable=true");
   const rows = Array.isArray(data) ? data : data.records || [];
   if (!rows.length) {
     el.className = "card muted";
@@ -657,7 +676,13 @@ document.getElementById("btnMeasure").onclick = async () => {
   btn.textContent = "Measuring…";
   try {
     const out = await j("/api/capacity/measure", { method: "POST" });
-    alert(`This batch: decode ok ${out.decode_ok_count}/${out.tested_count}. Already ok ${(out.already_decode_ok || []).length}. Remaining untested ${out.catalogue_remaining_untested}. Repeat Measure to test the next cameras. ${out.disclaimer}`);
+    alert(
+      `This batch: decode ok ${out.decode_ok_count}/${out.tested_count}. ` +
+        `Already ok ${(out.already_decode_ok || []).length}. ` +
+        `Untested left ${out.catalogue_remaining_untested}. ` +
+        `Failed left ${out.catalogue_remaining_failed ?? "—"}. ` +
+        `${out.disclaimer}`
+    );
     await refresh();
   } catch (err) {
     alert(String(err));
@@ -666,6 +691,30 @@ document.getElementById("btnMeasure").onclick = async () => {
     btn.textContent = "Measure government decode";
   }
 };
+async function startHunt() {
+  const out = await j("/api/hunt/start", { method: "POST" });
+  alert(out.disclaimer || out.label || `Hunt started. Hunting ${(out.hunting || []).length}/${out.total || 0}.`);
+  refresh();
+}
+async function pinHunt() {
+  const out = await j("/api/hunt/pin", { method: "POST" });
+  alert(out.disclaimer || `Pinned ${(out.started || []).length} working cameras. Queued ${(out.queued || []).length}.`);
+  refresh();
+}
+async function stopHunt() {
+  await j("/api/hunt/stop", { method: "POST" });
+  refresh();
+}
+document.getElementById("btnHuntStart").onclick = startHunt;
+document.getElementById("btnHuntStop").onclick = stopHunt;
+const huntPin = document.getElementById("btnHuntPin");
+if (huntPin) huntPin.onclick = pinHunt;
+const huntStart2 = document.getElementById("btnHuntStart2");
+const huntStop2 = document.getElementById("btnHuntStop2");
+if (huntStart2) huntStart2.onclick = startHunt;
+if (huntStop2) huntStop2.onclick = stopHunt;
+const huntPin2 = document.getElementById("btnHuntPin2");
+if (huntPin2) huntPin2.onclick = pinHunt;
 document.getElementById("btnStartAccessible").onclick = async () => {
   const out = await j("/api/workers/start-accessible", {
     method: "POST",

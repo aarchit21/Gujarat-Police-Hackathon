@@ -8,10 +8,12 @@ from app.services.ingest import (
     CaptureRegistry,
     OpenedSource,
     SourceOpenError,
+    apply_stream_userinfo,
     inference_plan,
     open_video_source,
     prepare_rtsp_tcp,
     resize_for_inference,
+    rtsp_url_for,
     scale_box,
 )
 from app.services.timing import PtsSampler, backoff_seconds
@@ -139,7 +141,45 @@ def test_capture_concurrency_and_queue(db):
     assert "CAM-B" in snap["queued"]
 
 
-def test_rtsp_uses_catalogue_provided_url():
+def test_apply_stream_userinfo_encodes_email_and_skips_if_already_present(monkeypatch):
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_username", "ops@example.com")
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_token", "pw/x")
+    out = apply_stream_userinfo("rtsp://103.250.160.189:8554/stream/cam01")
+    assert out.startswith("rtsp://ops%40example.com:pw%2Fx@103.250.160.189:8554/stream/cam01")
+    kept = apply_stream_userinfo("rtsp://user:pass@gateway/stream/cam01")
+    assert kept == "rtsp://user:pass@gateway/stream/cam01"
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_username", "")
+    assert apply_stream_userinfo("rtsp://103.250.160.189:8554/stream/cam01") == "rtsp://103.250.160.189:8554/stream/cam01"
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_username", "ops@example.com")
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_token", "secret")
+    hls = apply_stream_userinfo("https://cctv.corp8.cloud/cam04/index.m3u8")
+    assert hls == "https://cctv.corp8.cloud/cam04/index.m3u8"
+    whep = apply_stream_userinfo("http://103.250.160.189:8889/stream/cam04/whep")
+    assert "ops%40example.com" in whep
+    assert whep.endswith("/stream/cam04/whep")
+
+
+def test_rtsp_url_for_injects_portal_credentials(monkeypatch):
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_username", "ops@example.com")
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_token", "secret")
+    camera = SimpleNamespace(
+        source_type="rtsp",
+        source_uri="rtsp://103.250.160.189:8554/stream/cam01",
+        substream_uri="",
+        protected_rtsp_url_or_reference="",
+    )
+    url = rtsp_url_for(camera)
+    assert "ops%40example.com" in url
+    assert "secret" in url
+    from app.security import redact_url
+
+    assert "secret" not in redact_url(url)
+    assert "***:***@" in redact_url(url)
+
+
+def test_rtsp_uses_catalogue_provided_url(monkeypatch):
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_username", "")
+    monkeypatch.setattr("app.services.ingest.settings.cctv_access_token", "")
     camera = SimpleNamespace(
         source_type="rtsp",
         source_uri="",

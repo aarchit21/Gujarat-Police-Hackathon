@@ -57,6 +57,8 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "worker_state": worker_state,
         "last_frame_at": utc_iso(c.last_frame_at),
         "last_frame_at_ist": ist_label(c.last_frame_at),
+        "last_hunted_at": utc_iso(getattr(c, "last_hunted_at", None)),
+        "last_hunted_at_ist": ist_label(getattr(c, "last_hunted_at", None)),
         "last_error": c.last_error,
         "capabilities": c.capabilities,
         "vendor": c.vendor,

@@ -130,7 +130,9 @@ def measure_government_decode(
     untested = [c for c in gov if (c.decode_status or "untested") == "untested"]
     failed = [c for c in gov if c.decode_status == "failed"]
     already_ok = [c.id for c in gov if c.decode_status == "ok"]
-    queue = untested + failed
+    failed_known = [c for c in failed if c.width]
+    failed_other = [c for c in failed if not c.width]
+    queue = untested + failed_known + failed_other
     batch = queue[:cap]
     tested = []
     ok_ids = []
@@ -208,15 +210,20 @@ def measure_government_decode(
         "catalogue_remaining_untested": sum(
             1 for c in gov if (c.decode_status or "untested") == "untested"
         ),
+        "catalogue_remaining_failed": sum(1 for c in gov if c.decode_status == "failed"),
         "measured_safe_fps": host_fps,
         "requested_fps_hypothesis": requested,
         "recommended_target_fps": recommended,
         "sampling_reduced": recommended + 1e-9 < requested,
         "elapsed_s": round(elapsed_all, 3),
         "disclaimer": (
-            "Sequential decode probe of the next untested cameras only. "
-            "Not an 80,000-camera test. Repeat Measure to walk through the rest. "
-            "Decode ok is not a running worker."
+            (
+                "Retesting cameras that previously failed to open (none left untested). "
+                if not untested
+                else "Sequential decode probe of the next untested cameras, then previously-failed. "
+            )
+            + "Not an 80,000-camera test. Repeat Measure to walk the rest. "
+            "Decode ok is not a running worker — use Pin 4 working cameras after a decode-ok."
         ),
     }
 

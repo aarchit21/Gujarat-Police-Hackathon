@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import init_db, make_engine, make_session_factory
 from app.models import Camera, WatchlistEntry
 from app.services.anpr import PlateRead
@@ -11,7 +12,10 @@ from app.services.plates import normalize
 
 
 @pytest.fixture
-def db() -> Session:
+def db(tmp_path, monkeypatch) -> Session:
+    ev = tmp_path / "evidence"
+    ev.mkdir()
+    monkeypatch.setattr(settings, "evidence_dir", ev)
     engine = make_engine("sqlite:///:memory:")
     init_db(engine)
     session = make_session_factory(engine)()

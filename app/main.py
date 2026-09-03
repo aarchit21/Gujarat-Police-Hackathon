@@ -25,6 +25,7 @@ from app.services.snapshot import grab_snapshot
 from app.services.cost import estimate as estimate_cost
 from app.services.coverage import coverage
 from app.services.ollama_vision import vision_status
+from app.services.yolo_detect import yolo_status
 from app.services.serialize import ist_label, parse_vehicle_blob, utc_iso
 from app.services.vehicle_event import build_vehicle_event, is_recordable_plate
 from app.services.match import observed_plates, rematch_watchlist_entry
@@ -36,6 +37,7 @@ from app.services.serialize import alert_json, camera_public, inferred_links, pl
 from app.services.map_match import map_match_status
 from app.services.vehicle import vehicle_csv, vehicle_day, vehicle_geojson
 from app.services.vendor import VendorIngestError, ingest_vendor_event
+from app.services.hunt import hunt_status, start_hunt, stop_hunt
 from app.services.workers import manager
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -145,12 +147,14 @@ def health(db: Session = Depends(get_db)):
         "database": database_status(),
         "remote_inference_configured": bool(settings.remote_inference_url),
         "ollama_vision": vision_status(),
+        "yolo_detector": yolo_status(),
         "ingest_catalogue_url": redact_url(settings.ingest_catalogue_url),
         "catalogue_host": settings.catalogue_host(),
         "catalogue_auth_mode": settings.cctv_auth_mode or "none",
         "cctv_token_configured": bool(settings.cctv_access_token),
         "map_match": map_match_status(),
         "demo_autostart": settings.demo_autostart_workers,
+        "hunt": hunt_status(manager, db),
         "workers": snap,
         "capacity": capacity_snapshot(db),
         **_cov(db),
@@ -310,6 +314,7 @@ def api_observed_plates(db: Session = Depends(get_db)):
 def list_vehicle_events(
     limit: int = Query(default=50, ge=1, le=500),
     valid_only: bool = True,
+    include_unreadable: bool = False,
     db: Session = Depends(get_db),
 ):
     rows = list(db.scalars(select(Sighting).order_by(Sighting.source_time)))
@@ -321,6 +326,8 @@ def list_vehicle_events(
             payload = build_vehicle_event(camera=s.camera, sighting=s)
         if is_recordable_plate(s.plate_norm):
             records.append(payload)
+        elif include_unreadable and (s.vehicle_type or (payload or {}).get("vehicle", {}).get("type")):
+            records.append(payload)
         else:
             rejected.append(
                 {
@@ -329,23 +336,25 @@ def list_vehicle_events(
                     "observed_at": utc_iso(s.source_time),
                     "observed_at_ist": ist_label(s.source_time),
                     "provider": s.model_id or s.provider,
-                    "reason": "overlay or not an Indian plate",
+                    "reason": ((payload or {}).get("vehicle") or {}).get("unreadable_reason")
+                    or "overlay or not an Indian plate",
                 }
             )
     empty_reason = ""
     if not records:
         last = rejected[-1] if rejected else None
         empty_reason = (
-            "No valid vehicle JSON yet. A record is stored only when Ollama reads an Indian plate "
-            "(e.g. GJ01AB1234). Tesseract is not used."
+            "No vehicles logged yet. Hunt all 30 live feeds: YOLO stores each vehicle even when the plate "
+            "is unreadable. A plate card appears only when the crop is large enough for Ollama."
             + (f" Last discarded {last['plate']} on {last['camera_id']}." if last else "")
         )
     return {
         "records": records[-limit:],
-        "valid_count": len(records),
+        "valid_count": sum(1 for r in records if is_recordable_plate((r.get("vehicle") or {}).get("number_ocr") or (r.get("vehicle") or {}).get("number") or "")),
         "rejected_overlay": rejected[-12:],
         "empty_reason": empty_reason,
         "ollama": vision_status(),
+        "include_unreadable": include_unreadable,
     }
 
 
@@ -503,6 +512,48 @@ def api_start_accessible(
 ):
     payload = body or StartAccessibleIn()
     return start_accessible_workers(manager, db, actor=actor, decode_ok_only=payload.decode_ok_only)
+
+
+@app.get("/api/hunt")
+def api_hunt_status(db: Session = Depends(get_db)):
+    return hunt_status(manager, db)
+
+
+class HuntStartIn(BaseModel):
+    pinned_only: bool = False
+    pin_ids: list[str] | None = None
+
+
+@app.post("/api/hunt/start")
+def api_hunt_start(
+    body: HuntStartIn | None = None,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    payload = body or HuntStartIn()
+    return start_hunt(
+        manager,
+        db,
+        actor=actor,
+        pinned_only=payload.pinned_only,
+        pin_ids=payload.pin_ids,
+    )
+
+
+@app.post("/api/hunt/pin")
+def api_hunt_pin(
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    return start_hunt(manager, db, actor=actor, pinned_only=True)
+
+
+@app.post("/api/hunt/stop")
+def api_hunt_stop(
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    return stop_hunt(manager, db, actor=actor)
 
 
 @app.post("/api/capacity/measure")

@@ -4,6 +4,7 @@ __pycache__/
 data/cctv.db
 data/evidence/
 data/frames/
+data/models/
 docs/_unpacked_plan/
 docs/_slide_preview/
 docs/_pdf_preview/

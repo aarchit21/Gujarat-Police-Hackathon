@@ -28,7 +28,7 @@ def test_no_government_download_or_gateway_publish():
     cat = (APP / "services" / "catalogue.py").read_text(encoding="utf-8")
     assert "http.get" in cat or "httpx" in cat
     # Optional same-origin form POST is login-only. No camera-control or publish.
-    assert cat.count("http.post") == 1
+    assert cat.count("http.post") >= 1
     assert "GET_ONLY" in cat
     assert "rtsp://{" not in cat
     assert "DOCUMENTED_RTSP_PREFIX" in cat

@@ -47,6 +47,65 @@ def _looks_like_html(content_type: str, body: str) -> bool:
     return head.startswith("<!doctype") or head.startswith("<html")
 
 
+def _form_login_then_get(http: httpx.Client, catalogue_url: str, token: str):
+    """POST email+password to the portal, then GET cameras.json with the session cookie."""
+    if not token:
+        raise CatalogueError("CCTV_ACCESS_TOKEN is required for form authentication")
+    email = (settings.cctv_access_username or "").strip()
+    if not email:
+        raise CatalogueError(
+            "CCTV_ACCESS_USERNAME (login email) is required for form authentication. "
+            "The catalogue Sign In page asks for email and access password."
+        )
+    login_url = (settings.cctv_login_url or "").strip() or urljoin(_origin(catalogue_url), "/auth/login")
+    if _origin(login_url).lower() != _origin(catalogue_url).lower():
+        raise CatalogueError("CCTV_LOGIN_URL must use the same origin as INGEST_CATALOGUE_URL")
+    try:
+        http.get(login_url)
+    except httpx.HTTPError:
+        pass
+    login = http.post(login_url, data={"email": email, "password": token})
+    if login.status_code in {401, 403}:
+        raise CatalogueError(f"catalogue HTTP {login.status_code}", status_code=login.status_code)
+    login.raise_for_status()
+    login_body = login.text or ""
+    if _looks_like_html(login.headers.get("content-type", ""), login_body) and (
+        'name="password"' in login_body.lower() or "sign in" in login_body.lower()
+    ):
+        raise CatalogueError(
+            "catalogue login did not start a session; check CCTV_ACCESS_USERNAME (email) "
+            "and CCTV_ACCESS_TOKEN (access password)",
+            status_code=login.status_code,
+        )
+    return http.get(catalogue_url)
+
+
+def portal_cookie_header() -> str:
+    """Session cookie after form login, for HLS on the CDN. Never log the value."""
+    if (settings.cctv_auth_mode or "").strip().lower() != "form":
+        return ""
+    email = (settings.cctv_access_username or "").strip()
+    token = (settings.cctv_access_token or "").strip()
+    if not email or not token:
+        return ""
+    catalogue = (settings.ingest_catalogue_url or DEFAULT_CATALOGUE_URL).strip()
+    login_url = (settings.cctv_login_url or "").strip() or urljoin(_origin(catalogue), "/auth/login")
+    if _origin(login_url).lower() != _origin(catalogue).lower():
+        return ""
+    try:
+        with httpx.Client(timeout=settings.catalogue_sync_timeout_seconds, follow_redirects=True) as http:
+            try:
+                http.get(login_url)
+            except httpx.HTTPError:
+                pass
+            login = http.post(login_url, data={"email": email, "password": token})
+            if login.status_code in {401, 403}:
+                return ""
+            return "; ".join(f"{name}={value}" for name, value in http.cookies.items())
+    except httpx.HTTPError:
+        return ""
+
+
 def catalogue_auth_headers() -> dict[str, str]:
     """Build request headers. Never log the returned values."""
     mode = (settings.cctv_auth_mode or "none").strip().lower() or "none"
@@ -84,16 +143,7 @@ def fetch_catalogue(url: str, *, timeout: float | None = None, client: httpx.Cli
         token = (settings.cctv_access_token or "").strip()
         try:
             if mode == "form":
-                if not token:
-                    raise CatalogueError("CCTV_ACCESS_TOKEN is required for form authentication")
-                login_url = settings.cctv_login_url.strip() or urljoin(_origin(url), "/auth/login")
-                if _origin(login_url).lower() != _origin(url).lower():
-                    raise CatalogueError("CCTV_LOGIN_URL must use the same origin as INGEST_CATALOGUE_URL")
-                login = http.post(login_url, data={"password": token})
-                if login.status_code in {401, 403}:
-                    raise CatalogueError(f"catalogue HTTP {login.status_code}", status_code=login.status_code)
-                login.raise_for_status()
-                response = http.get(url)
+                response = _form_login_then_get(http, url, token)
             elif mode == "bearer":
                 response = http.get(url, headers=catalogue_auth_headers())
             elif mode == "basic":
@@ -115,7 +165,16 @@ def fetch_catalogue(url: str, *, timeout: float | None = None, client: httpx.Cli
         if status_code in {401, 403}:
             raise CatalogueError(f"catalogue HTTP {status_code}", status_code=status_code)
         if _looks_like_html(content_type, body):
-            raise CatalogueError("catalogue returned HTML/login page instead of JSON", status_code=status_code)
+            hint = ""
+            if mode == "form":
+                hint = (
+                    " Form login needs CCTV_ACCESS_USERNAME (email) and CCTV_ACCESS_TOKEN "
+                    "(access password). A successful login must return JSON, not the Sign In page."
+                )
+            raise CatalogueError(
+                "catalogue returned HTML/login page instead of JSON." + hint,
+                status_code=status_code,
+            )
         if status_code >= 400:
             raise CatalogueError(f"catalogue HTTP {status_code}", status_code=status_code)
         try:

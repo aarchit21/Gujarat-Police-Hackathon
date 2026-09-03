@@ -41,6 +41,12 @@ def main() -> None:
         print("ollama_vision", vision_status())
     except Exception as exc:
         print("ollama_vision FAIL", exc)
+    try:
+        from app.services.yolo_detect import yolo_status
+
+        print("yolo_detector", yolo_status())
+    except Exception as exc:
+        print("yolo_detector FAIL", exc)
     print("max_concurrent_captures", settings.max_open_captures)
     net = host_network_report(include_rtsp_probe=False)
     print("network")

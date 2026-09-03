@@ -54,6 +54,11 @@ class WorkerManager:
         self._states: dict[str, WorkerState] = {}
         self._queue: list[str] = []
         self._previews: dict[str, PreviewState] = {}
+        self.hunt_enabled = False
+        self.hunt_cycle_id = ""
+        self.hunt_cycle = 0
+        self.hunt_target_ids: set[str] = set()
+        self.hunt_visited: set[str] = set()
         self.open_fn = open_video_source
         self.sleep_fn: Callable[[float], None] = time.sleep
         self.now_fn: Callable[[], float] = time.monotonic
@@ -95,10 +100,42 @@ class WorkerManager:
                 return "queued"
             return ""
 
+    def begin_hunt(self, camera_ids: list[str]) -> None:
+        with self._lock:
+            self.hunt_enabled = True
+            self.hunt_cycle_id = uuid.uuid4().hex[:12]
+            self.hunt_cycle = 1
+            self.hunt_target_ids = set(camera_ids)
+            self.hunt_visited = set()
+            for cid in camera_ids:
+                if cid not in self._queue:
+                    self._queue.append(cid)
+
+    def end_hunt(self) -> None:
+        with self._lock:
+            ids = set(self.hunt_target_ids)
+            self.hunt_enabled = False
+            self.hunt_target_ids = set()
+            self.hunt_visited = set()
+            self._queue = [cid for cid in self._queue if cid not in ids]
+
+    def mark_hunted(self, camera_id: str) -> None:
+        with self._lock:
+            if not self.hunt_enabled:
+                return
+            self.hunt_visited.add(camera_id)
+            if self.hunt_target_ids and self.hunt_target_ids <= self.hunt_visited:
+                self.hunt_cycle += 1
+                self.hunt_visited = set()
+            if camera_id not in self._queue and camera_id in self.hunt_target_ids:
+                self._queue.append(camera_id)
+
     def start_preview(self, camera: Camera, protocol: str) -> dict:
         protocol = protocol.lower()
         if protocol == "whep":
-            url = camera.whep_url
+            from app.services.ingest import apply_stream_userinfo
+
+            url = apply_stream_userinfo(camera.whep_url or "")
         elif protocol in {"hls", "snapshot"}:
             url = camera.hls_url
         else:
@@ -220,7 +257,7 @@ class WorkerManager:
             stop = self._stops.get(camera_id)
             if stop:
                 stop.set()
-            if camera_id in self._queue:
+            if camera_id in self._queue and not self.hunt_enabled:
                 self._queue.remove(camera_id)
         camera = db.get(Camera, camera_id)
         if camera is not None:
@@ -231,6 +268,7 @@ class WorkerManager:
         return {"ok": True, "camera_id": camera_id, "state": "stopping"}
 
     def stop_all(self) -> None:
+        self.end_hunt()
         with self._lock:
             for ev in self._stops.values():
                 ev.set()
@@ -262,6 +300,10 @@ class WorkerManager:
                     camera.analytics_active = False
                     if state.error and not camera.last_error:
                         camera.last_error = state.error
+                    if self.hunt_enabled and camera_id in self.hunt_target_ids:
+                        from app.services.hunt import mark_camera_hunted
+
+                        mark_camera_hunted(db, camera_id)
                     close_activity(db, camera_id, reason="worker_exit")
                     db.add(AuditEvent(action="worker_exit", detail=f"{camera_id} {state.status} {state.error}"[:2000]))
                     db.commit()
@@ -271,6 +313,8 @@ class WorkerManager:
                 self._threads.pop(camera_id, None)
                 self._stops.pop(camera_id, None)
             self.registry.release(camera_id)
+            if self.hunt_enabled:
+                self.mark_hunted(camera_id)
             self._promote_queue()
 
     def _run_batch(self, db, camera: Camera, stop: threading.Event, state: WorkerState) -> None:
@@ -284,6 +328,7 @@ class WorkerManager:
         db.commit()
 
     def _run_live(self, db, camera: Camera, stop: threading.Event, state: WorkerState) -> None:
+        hunting = self.hunt_enabled and camera.id in self.hunt_target_ids
         run_live_loop(
             db,
             camera,
@@ -293,6 +338,9 @@ class WorkerManager:
             sleep_fn=self.sleep_fn,
             now_fn=self.now_fn,
             registry=self.registry,
+            max_frames=settings.hunt_max_frames if hunting else None,
+            max_seconds=settings.hunt_dwell_seconds if hunting else None,
+            reconnect=True,
         )
 
     def _promote_queue(self) -> None:
@@ -326,12 +374,29 @@ def run_live_loop(
     registry: CaptureRegistry | None = None,
     read_fn=None,
     max_frames: int | None = None,
+    max_seconds: float | None = None,
     process_fn=None,
+    reconnect: bool = True,
 ) -> dict:
-    """Reconnect with bounded exponential backoff. Cancel immediately on stop."""
+    """Reconnect with bounded exponential backoff. Cancel immediately on stop.
+
+    Hunt mode sets reconnect=False and a dwell deadline so the slot rotates.
+    """
     attempt = 0
     processed = 0
-    while not stop.is_set():
+    loop_started = now_fn()
+    first_frame_at: dict[str, float | None] = {"t": None}
+
+    def timed_out() -> bool:
+        if max_seconds is None:
+            return False
+        t0 = first_frame_at["t"]
+        if t0 is None:
+            limit = max(float(max_seconds), float(settings.keyframe_wait_seconds) + 10.0)
+            return (now_fn() - loop_started) >= limit
+        return (now_fn() - t0) >= float(max_seconds)
+
+    while not stop.is_set() and not timed_out():
         camera.analytics_active = False
         db.commit()
         try:
@@ -339,7 +404,8 @@ def run_live_loop(
         except SourceOpenError as exc:
             attempt += 1
             camera.reconnect_count = (camera.reconnect_count or 0) + 1
-            camera.decode_status = "failed"
+            if (camera.decode_status or "") != "ok":
+                camera.decode_status = "failed"
             camera.decode_tested_at = datetime.now(timezone.utc)
             camera.analytics_active = False
             camera.last_error = json.dumps(diagnostics(camera, protocol="rtsp", error=str(exc)))
@@ -349,6 +415,8 @@ def run_live_loop(
             state.status = "reconnect_wait"
             db.add(AuditEvent(action="reconnect", detail=f"{camera.id} attempt={attempt} {exc}"[:2000]))
             db.commit()
+            if not reconnect:
+                break
             _sleep_backoff(stop, sleep_fn, attempt)
             continue
         except Exception as exc:
@@ -356,6 +424,8 @@ def run_live_loop(
             camera.analytics_active = False
             camera.last_error = str(exc)
             db.commit()
+            if not reconnect:
+                break
             _sleep_backoff(stop, sleep_fn, attempt)
             continue
 
@@ -371,13 +441,15 @@ def run_live_loop(
         processor = None if process_fn else FrameProcessor(db, camera, run_id=run_id, read_fn=read_fn)
 
         try:
-            while not stop.is_set():
+            while not stop.is_set() and not timed_out():
                 ok, frame, pts = opened.read()
                 if not ok or frame is None:
                     if not got_frame and (now_fn() - join_started) < settings.keyframe_wait_seconds:
                         continue
                     break
                 got_frame = True
+                if first_frame_at["t"] is None:
+                    first_frame_at["t"] = now_fn()
                 maybe_save_live_preview(camera.id, frame)
                 camera.decode_status = "ok"
                 camera.status = "connected"
@@ -397,14 +469,13 @@ def run_live_loop(
                 state.frames = processed
                 state.last_pts_ms = pts
                 if max_frames is not None and processed >= max_frames:
-                    stop.set()
                     break
         finally:
             opened.release()
             camera.analytics_active = False
             db.commit()
 
-        if stop.is_set():
+        if stop.is_set() or not reconnect or timed_out() or (max_frames is not None and processed >= max_frames):
             break
         attempt += 1
         camera.reconnect_count = (camera.reconnect_count or 0) + 1

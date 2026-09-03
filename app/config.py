@@ -26,7 +26,8 @@ class Settings(BaseSettings):
 
     # Hypothesis default only. Per-camera target_analysis_fps overrides. Do not treat as measured capacity.
     analysis_fps: float = 2.0
-    min_plate_width_px: int = 80
+    min_plate_width_px: int = 24
+    min_vision_box_px: int = 24
     passage_gap_ms: float = 3000.0
     pts_jump_reset_ms: float = 5000.0
     inference_max_width: int = 1280
@@ -57,7 +58,18 @@ class Settings(BaseSettings):
     ollama_vision_on_own_feed: bool = True
     ollama_vision_timeout_seconds: float = 90.0
     ollama_vision_max_width: int = 768
-    ollama_live_interval_seconds: float = 2.5
+    ollama_live_interval_seconds: float = 0.4
+    ollama_lock_wait_seconds: float = 25.0
+
+    yolo_enabled: bool = True
+    yolo_weights: str = "yolov8n.pt"
+    yolo_device: str = "auto"
+    yolo_conf: float = 0.35
+    yolo_max_crops: int = 2
+    # Hunt: 4 capture slots rotate across all live catalogue cameras.
+    hunt_dwell_seconds: float = 28.0
+    hunt_max_frames: int = 40
+    rtsp_open_wait_seconds: float = 6.0
 
     vendor_max_payload_bytes: int = 64_000
     max_upload_bytes: int = 8_000_000

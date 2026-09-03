@@ -21,12 +21,14 @@ VEHICLE_TYPES = (
 
 VEHICLE_PROMPT = (
     "You are reading a still from a traffic CCTV camera in India. "
-    "Look for a real vehicle body and its number plate. "
-    "Ignore on-screen HUD, channel names, PTZ labels, timestamps, and watermarks. "
+    "This crop is zoomed on a vehicle, often the front or rear bumper. "
+    "Read the registration painted on the number plate if those characters are visible. "
+    "Always fill vehicle_type and color from the vehicle body even if the plate is unreadable. "
+    "Ignore on-screen HUD, channel names, PTZ labels, timestamps, watermarks, and billboards. "
     "Return JSON only, no markdown: "
     '{"plate_text":"","vehicle_type":"car|suv|truck|bus|van|two_wheeler|auto_rickshaw|unknown",'
     '"make":"","model":"","color":"","confidence":0.0}. '
-    "plate_text must be A-Z and 0-9 only, the registration painted on the vehicle. "
+    "plate_text must be A-Z and 0-9 only. "
     "If you cannot read a plate, plate_text must be empty. Do not guess a typical plate."
 )
 
@@ -160,7 +162,9 @@ def build_vehicle_event(*, camera, sighting, extras: dict | None = None) -> dict
             "make": extra.get("vehicle_make") or getattr(sighting, "vehicle_make", "") or "",
             "model": extra.get("vehicle_model") or getattr(sighting, "vehicle_model", "") or "",
             "color": extra.get("vehicle_color") or getattr(sighting, "vehicle_color", "") or "",
+            "unreadable_reason": extra.get("unreadable_reason") or "",
         },
+        "gemma": extra.get("gemma") or {},
         "confidence": {
             "plate": float(sighting.confidence or 0.0),
         },

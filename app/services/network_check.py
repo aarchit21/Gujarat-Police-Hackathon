@@ -36,8 +36,14 @@ def _dns(host: str) -> dict:
 
 
 def probe_one_rtsp(url: str, *, timeout: float = 20.0) -> dict:
-    """Open one catalogue-provided RTSP URL and try to read a single frame."""
+    """Open one catalogue-provided RTSP URL and try to read a single frame.
+
+    FFmpeg often reports isOpened()=False for a few seconds. Wait for a frame.
+    """
+    import time as _time
+
     prepare_rtsp_tcp()
+    wait = min(float(timeout or 20.0), max(3.0, float(getattr(settings, "rtsp_open_wait_seconds", 6.0) or 6.0)))
     box: dict = {
         "ok": False,
         "opened": False,
@@ -48,30 +54,45 @@ def probe_one_rtsp(url: str, *, timeout: float = 20.0) -> dict:
         "backend": opencv_version(),
         "url_redacted": redact_url(url),
         "error": "",
+        "protocol": "rtsp",
     }
 
     def run() -> None:
+        cap = None
         try:
             import cv2
 
             cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            box["opened"] = bool(cap.isOpened())
-            if not box["opened"]:
-                box["error"] = "VideoCapture not opened"
-                cap.release()
-                return
-            ok, frame = cap.read()
-            pts = cap.get(cv2.CAP_PROP_POS_MSEC)
+            deadline = _time.monotonic() + wait
+            frame = None
+            ok = False
+            while _time.monotonic() < deadline:
+                box["opened"] = bool(cap.isOpened())
+                if box["opened"]:
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        break
+                _time.sleep(0.2)
+            pts = cap.get(cv2.CAP_PROP_POS_MSEC) if box["opened"] else None
             box["width"] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
             box["height"] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
-            cap.release()
             box["frame"] = bool(ok and frame is not None)
             box["pts_ms"] = float(pts) if pts is not None else None
             box["ok"] = box["frame"]
-            if not box["frame"]:
+            if box["frame"]:
+                box["error"] = ""
+            elif not box["opened"]:
+                box["error"] = "VideoCapture not opened"
+            else:
                 box["error"] = "no usable frame"
         except Exception as exc:
             box["error"] = redact_secrets(str(exc))
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()

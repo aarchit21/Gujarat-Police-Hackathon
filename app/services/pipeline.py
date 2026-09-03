@@ -12,7 +12,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import AuditEvent, Camera, Sighting
-from app.services.anpr import load_bgr, local_model_hash, prepare_live_anpr_frame
+from app.services.anpr import (
+    anpr_crops,
+    crop_box_width,
+    enhance_plate_crop,
+    estimate_vehicle_color,
+    load_bgr,
+    local_model_hash,
+)
 from app.services.evidence import save_crop
 from app.services.ingest import (
     SourceOpenError,
@@ -23,7 +30,7 @@ from app.services.ingest import (
     scale_box,
 )
 from app.services.match import match_sighting
-from app.services.ollama_vision import OllamaVisionError, infer_vehicle
+from app.services.ollama_vision import OllamaVisionError, infer_bgr, infer_vehicle
 from app.services.vehicle_event import build_vehicle_event, is_recordable_plate
 from app.services.plates import normalize, syntax_ok, vote
 from app.services.processing import select_processing_route, target_fps
@@ -57,6 +64,8 @@ def persist_sighting(
     vehicle_make: str = "",
     vehicle_model: str = "",
     vehicle_color: str = "",
+    unreadable_reason: str = "",
+    gemma: dict | None = None,
 ) -> tuple[Sighting, object | None, bool]:
     ingest = ingest_time or datetime.now(timezone.utc)
     source_time, _offset_applied = source_time_from_ingest(ingest, camera.clock_offset_ms)
@@ -99,10 +108,14 @@ def persist_sighting(
         "vehicle_make": vehicle_make,
         "vehicle_model": vehicle_model,
         "vehicle_color": vehicle_color,
+        "unreadable_reason": unreadable_reason,
+        "gemma": gemma or {},
     }
     event = build_vehicle_event(camera=camera, sighting=sighting, extras=extras)
     event["watchlist_matched"] = False
-    alert, created = match_sighting(db, sighting)
+    alert, created = None, False
+    if is_recordable_plate(plate_norm or plate_voted):
+        alert, created = match_sighting(db, sighting)
     event["watchlist_matched"] = bool(created or alert)
     sighting.vehicle_json = event
     camera.last_frame_at = ingest
@@ -167,6 +180,7 @@ class FrameProcessor:
         self.alerts = 0
         self.seen = 0
         self.sampled = 0
+        self.passage_logged_unreadable = False
         self.route = select_processing_route(camera)
         self.provider_kind = self.route["worker_kind"]
         if camera.source_type in {"image_dir", "file"} and self.provider_kind == "deferred":
@@ -184,6 +198,7 @@ class FrameProcessor:
     def reset_passage(self, pts_ms: float | None, reason: str) -> None:
         self.raws.clear()
         self.sampler.reset()
+        self.passage_logged_unreadable = False
         self.passage = f"{self.camera.id}-{self.run_id}-{self.clock.passage_serial}"
         self.db.add(
             AuditEvent(
@@ -206,7 +221,9 @@ class FrameProcessor:
         if not self.camera.width:
             self.camera.width = w
             self.camera.height = h
-        small, scale = resize_for_inference(bgr)
+        live = self.camera.source_type in {"rtsp", "hls", "onvif"}
+        max_w = 1920 if live else settings.inference_max_width
+        small, scale = resize_for_inference(bgr, max_width=max_w)
         result = _read_plate(
             self.camera,
             small,
@@ -220,14 +237,25 @@ class FrameProcessor:
         conf = result["confidence"]
         crop = result["crop"]
         box = scale_box(result["box"], scale)
-        live = self.camera.source_type in {"rtsp", "hls", "onvif"}
-        if live and not is_recordable_plate(plate_norm):
+        recordable = is_recordable_plate(plate_norm)
+        yolo_vehicle = (result.get("detector") == "yolov8n") or bool(result.get("vehicle_type"))
+        unreadable = str(result.get("unreadable_reason") or "")
+        if live:
+            if recordable:
+                pass
+            elif yolo_vehicle and result.get("detector") == "yolov8n":
+                if self.passage_logged_unreadable:
+                    return None
+                self.passage_logged_unreadable = True
+                unreadable = unreadable or "no_plate"
+            else:
+                return None
+        elif not plate_raw and not plate_norm:
             return None
-        if not plate_raw and not plate_norm:
-            return None
-        self.raws.append(plate_raw or plate_norm)
-        voted = vote(self.raws[-5:])
-        evidence = save_crop(crop, self.camera.id, plate_norm or voted)
+        if recordable:
+            self.raws.append(plate_raw or plate_norm)
+        voted = vote(self.raws[-5:]) if self.raws else (plate_norm or "")
+        evidence = save_crop(crop, self.camera.id, plate_norm or voted or "unread")
         sighting, _alert, alert_created = persist_sighting(
             self.db,
             self.camera,
@@ -250,6 +278,8 @@ class FrameProcessor:
             vehicle_make=result.get("vehicle_make") or "",
             vehicle_model=result.get("vehicle_model") or "",
             vehicle_color=result.get("vehicle_color") or "",
+            unreadable_reason="" if recordable else unreadable,
+            gemma=result.get("gemma") if isinstance(result.get("gemma"), dict) else None,
         )
         self.created += 1
         if alert_created:
@@ -338,7 +368,52 @@ def _empty_read() -> dict:
         "vehicle_make": "",
         "vehicle_model": "",
         "vehicle_color": "",
+        "detector": "",
+        "unreadable_reason": "",
     }
+
+
+def _yolo_only_read(item: dict, *, reason: str, vision: dict | None = None) -> dict:
+    vis = vision or {}
+    crop = item.get("crop")
+    color = vis.get("vehicle_color") or estimate_vehicle_color(crop) or estimate_vehicle_color(item.get("body_crop"))
+    vtype = vis.get("vehicle_type") or item.get("vehicle_type") or "unknown"
+    if vtype in {"", "unknown"} and item.get("vehicle_type"):
+        vtype = item["vehicle_type"]
+    raw = vis.get("plate_raw") or vis.get("plate_norm") or ""
+    norm = vis.get("plate_norm") or ""
+    if raw and not is_recordable_plate(norm):
+        reason = "partial"
+    out = _empty_read()
+    out.update(
+        {
+            "crop": crop,
+            "box": item.get("box"),
+            "plate_raw": raw,
+            "plate_norm": norm if is_recordable_plate(norm) else "",
+            "vehicle_type": vtype,
+            "vehicle_make": vis.get("vehicle_make") or "",
+            "vehicle_model": vis.get("vehicle_model") or "",
+            "vehicle_color": color or "",
+            "detector": "yolov8n",
+            "unreadable_reason": reason,
+            "model_id": vis.get("model_id") or "yolov8n",
+            "model_hash": vis.get("model_hash") or "",
+            "provider": vis.get("provider") or "yolo",
+            "confidence": float(vis.get("confidence") or 0.0),
+            "gemma": vis.get("gemma")
+            or {
+                "called": bool(vis.get("model_id") or vis.get("provider") == "ollama_vision"),
+                "skipped": reason if reason in {"busy", "throttled", "too_small"} else "",
+                "plate_text": raw or vis.get("plate_text") or "",
+                "type": vtype,
+                "color": color or "",
+                "crop_w": int(crop.shape[1]) if crop is not None and getattr(crop, "shape", None) is not None else 0,
+                "crop_h": int(crop.shape[0]) if crop is not None and getattr(crop, "shape", None) is not None else 0,
+            },
+        }
+    )
+    return out
 
 
 def _read_plate(
@@ -367,36 +442,114 @@ def _read_plate(
         )
         return out
     live = camera.source_type in {"rtsp", "hls", "onvif"}
+    crops = anpr_crops(bgr, live=live)
+    min_w = int(getattr(settings, "min_vision_box_px", None) or settings.min_plate_width_px or 24)
+    best_yolo = next((c for c in crops if c.get("detector") == "yolov8n"), None)
+    last_skip = ""
+    last_vision: dict | None = None
+    last_item: dict | None = None
     if settings.ollama_vision_enabled:
-        try:
-            target = prepare_live_anpr_frame(bgr) if live else bgr
-            vision = infer_vehicle(target, camera_id=camera.id)
+        for i, item in enumerate(crops):
+            width = crop_box_width(item)
+            if item.get("detector") == "yolov8n" and width < min_w:
+                last_skip = "too_small"
+                continue
+            if live and item.get("detector") != "yolov8n":
+                continue
+            crop = item.get("crop")
+            if crop is None:
+                crop = item.get("body_crop")
+            if crop is None:
+                continue
+            native = item.get("body_crop")
+            if native is None:
+                native = crop
+            enhanced = enhance_plate_crop(native, min_width=320)
+            item = {**item, "crop": enhanced}
+            vision: dict = {}
+            try:
+                plate_hits = list(item.get("plate_crops") or [])[:2]
+                for patch in plate_hits:
+                    tight = enhance_plate_crop(patch, min_width=400)
+                    read = infer_bgr(tight)
+                    if is_recordable_plate(read.plate_norm):
+                        vision = {
+                            "plate_raw": read.plate_raw,
+                            "plate_norm": read.plate_norm,
+                            "confidence": read.confidence,
+                            "vehicle_type": item.get("vehicle_type") or "",
+                            "vehicle_color": estimate_vehicle_color(item.get("body_crop") or enhanced),
+                            "model_id": read.model_id,
+                            "model_hash": read.model_hash,
+                            "provider": "ollama_vision",
+                        }
+                        item = {**item, "crop": tight}
+                        break
+                if not is_recordable_plate((vision or {}).get("plate_norm")):
+                    vision = infer_vehicle(enhanced, camera_id=camera.id if i == 0 else "")
+                    if isinstance(vision, dict) and "gemma" not in vision:
+                        vision["gemma"] = {
+                            "called": not bool(vision.get("skipped")),
+                            "skipped": vision.get("skipped") or "",
+                            "plate_text": vision.get("plate_raw") or vision.get("plate_norm") or "",
+                            "type": vision.get("vehicle_type") or "",
+                            "color": vision.get("vehicle_color") or "",
+                            "crop_w": int(enhanced.shape[1]) if enhanced is not None else 0,
+                            "crop_h": int(enhanced.shape[0]) if enhanced is not None else 0,
+                        }
+            except OllamaVisionError as exc:
+                camera.last_error = str(exc)
+                if best_yolo:
+                    return _yolo_only_read(best_yolo, reason="vision_error")
+                return _empty_read()
+            if vision.get("skipped"):
+                last_skip = str(vision.get("skipped"))
+                last_item = item
+                continue
+            last_vision = vision
+            last_item = item
             if is_recordable_plate(vision.get("plate_norm")):
+                vtype = vision.get("vehicle_type") or item.get("vehicle_type") or "unknown"
+                if vtype in {"", "unknown"} and item.get("vehicle_type"):
+                    vtype = item["vehicle_type"]
+                color = vision.get("vehicle_color") or estimate_vehicle_color(enhanced)
                 out = _empty_read()
                 out.update(
                     {
                         "plate_raw": vision.get("plate_raw") or vision.get("plate_norm") or "",
                         "plate_norm": vision.get("plate_norm") or "",
                         "confidence": float(vision.get("confidence") or 0.0),
-                        "crop": target,
-                        "box": None,
+                        "crop": enhanced,
+                        "box": item.get("box"),
                         "model_id": vision.get("model_id") or "",
                         "model_hash": vision.get("model_hash") or "",
                         "provider": "ollama_vision",
-                        "vehicle_type": vision.get("vehicle_type") or "unknown",
+                        "vehicle_type": vtype,
                         "vehicle_make": vision.get("vehicle_make") or "",
                         "vehicle_model": vision.get("vehicle_model") or "",
-                        "vehicle_color": vision.get("vehicle_color") or "",
+                        "vehicle_color": color or "",
+                        "detector": item.get("detector") or "",
+                        "gemma": vision.get("gemma")
+                        or {
+                            "called": True,
+                            "skipped": "",
+                            "plate_text": vision.get("plate_raw") or vision.get("plate_norm") or "",
+                            "type": vtype,
+                            "color": color or "",
+                            "crop_w": int(enhanced.shape[1]) if enhanced is not None else 0,
+                            "crop_h": int(enhanced.shape[0]) if enhanced is not None else 0,
+                        },
                     }
                 )
                 return out
-            if vision.get("skipped"):
-                return _empty_read()
-            camera.last_error = "ollama: no readable plate in this frame"
-            return _empty_read()
-        except OllamaVisionError as exc:
-            camera.last_error = str(exc)
-            return _empty_read()
+        chosen = last_item or best_yolo
+        if chosen and chosen.get("detector") == "yolov8n":
+            camera.last_error = f"yolo: vehicle seen, plate {last_skip or 'unreadable'}"
+            return _yolo_only_read(chosen, reason=last_skip or "no_plate", vision=last_vision)
+        camera.last_error = "yolo+ollama: no vehicle crop large enough for a plate"
+        return _empty_read()
+    if best_yolo:
+        return _yolo_only_read(best_yolo, reason="no_plate")
     if provider_kind == "remote_gpu" and settings.remote_inference_url:
         try:
             import cv2

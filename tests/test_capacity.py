@@ -105,16 +105,50 @@ def test_measure_skips_already_ok_and_probes_untested(db):
     seen = []
 
     def probe(url, timeout=12.0):
-        seen.append(url)
+        seen.append(url.split("@")[-1] if "@" in url else url)
         return {"ok": True, "frame": True, "width": 1280, "height": 720, "pts_ms": 10, "error": ""}
 
     out = measure_government_decode(db, limit=1, probe_fn=probe)
-    assert seen == ["rtsp://x/cam05"]
+    assert seen == ["x/cam05"]
     assert out["decode_ok"] == ["cam05"]
     assert "cam01" in (out.get("already_decode_ok") or [])
     from app.models import Camera
 
     assert db.get(Camera, "cam05").decode_status == "ok"
+
+
+def test_measure_retries_failed_preferring_known_size(db):
+    add_camera(
+        db,
+        id="cam04",
+        source_type="rtsp",
+        source_uri="rtsp://x/cam04",
+        catalogue_camera_id="cam04",
+        processing_mode="local_worker",
+        decode_status="failed",
+        width=None,
+    )
+    add_camera(
+        db,
+        id="cam01",
+        source_type="rtsp",
+        source_uri="rtsp://x/cam01",
+        catalogue_camera_id="cam01",
+        processing_mode="local_worker",
+        decode_status="failed",
+        width=1920,
+        height=1080,
+    )
+    seen = []
+
+    def probe(url, timeout=12.0):
+        seen.append(url.split("@")[-1] if "@" in url else url)
+        return {"ok": True, "frame": True, "width": 1920, "height": 1080, "pts_ms": 10, "error": ""}
+
+    out = measure_government_decode(db, limit=1, probe_fn=probe)
+    assert seen == ["x/cam01"]
+    assert out["decode_ok"] == ["cam01"]
+    assert out["catalogue_remaining_untested"] == 0
 
 
 def test_start_accessible_promotes_deferred_decode_ok(db):

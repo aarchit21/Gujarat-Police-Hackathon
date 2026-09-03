@@ -10,3 +10,5 @@ python-multipart>=0.0.9
 httpx>=0.27
 psycopg[binary]>=3.2
 pytest>=8.0
+# Optional YOLOv8n vehicle detector. First run downloads yolov8n.pt (~6MB).
+ultralytics>=8.3

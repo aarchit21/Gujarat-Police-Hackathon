@@ -18,6 +18,7 @@
   <div class="banner" id="coverageBanner">Coverage loading…</div>
   <div class="stats" id="statsBar"></div>
   <div class="demo" id="demoStrip">Demo: workers idle · last sighting —</div>
+  <div class="hunt" id="huntStrip">Hunt idle — this host can run 4 live streams at a time, not 30 at once.</div>
   <div class="layout">
     <div class="map-wrap">
       <div id="map"></div>
@@ -33,11 +34,14 @@
     </div>
     <aside>
       <div class="row">
-        <button id="btnAnalyze">Run own-feed analysis</button>
+        <button id="btnHuntPin">Pin 4 working cameras</button>
+        <button id="btnHuntStart">Hunt all 30 live feeds</button>
+        <button class="secondary" id="btnHuntStop">Stop hunt</button>
+        <button class="secondary" id="btnAnalyze">Run own-feed analysis</button>
         <button class="secondary" id="btnRefresh">Refresh</button>
         <button class="secondary" id="btnSync">Sync catalogue</button>
       </div>
-      <p class="legend">Own-feed cameras are separate from the government catalogue. Catalogue cameras without GPS are given a placeholder map offset (not a surveyed site). Click a marker for a live snapshot — government HLS is not sent to the browser. Map lines are inferred, not proven roads.</p>
+      <p class="legend">Hunt rotates 4 RTSP slots across every live catalogue camera. YOLO logs each vehicle even when the plate is unreadable. Ollama reads a plate only if the vehicle box is large enough. This is not 30 simultaneous decodes and not a central VMS. Map lines are inferred, not proven roads.</p>
 
       <div class="tabs">
         <button class="tab on" data-tab="monitor">Monitor</button>
@@ -83,7 +87,7 @@
         </div>
         <div id="history"></div>
         <h2>Live vehicles</h2>
-        <p class="legend">ANPR is Ollama vision only. Full event JSON is stored in the database (JSONB on PostgreSQL). This list shows plate, type, colour, IST time, camera, and location.</p>
+        <p class="legend">YOLO finds the vehicle. The bumper crop is sharpened and sent to Gemma 31b for the plate and colour. If characters are not in the pixels, the plate stays unreadable — we do not invent a number.</p>
         <div id="liveVehicles" class="card muted">Waiting for vehicle records…</div>
         <h2>Recent OCR strings</h2>
         <div id="liveSightings" class="card muted">Waiting for sightings…</div>
@@ -135,7 +139,12 @@
 
       <section data-panel="workers" class="hidden">
         <h2>Worker manager</h2>
-        <p class="legend">Decode = this laptop can open the live RTSP and get a frame. It is not plate reading yet. Measure tests the next 4 untested government cameras (one at a time). Repeat Measure until remaining untested is 0. Then Start accessible — only decode-ok cameras run ANPR. This host holds 4 workers; extras queue. Do not run uvicorn with --reload while workers are running (reload restarts the process and kills them).</p>
+        <p class="legend">Hunt all 30 is the demo path: 4 concurrent streams rotate so every live camera is visited. Decode = this laptop opened RTSP and got a frame, not a plate. Measure tests the next 4 untested cameras. Do not run uvicorn with --reload while workers are running.</p>
+        <div class="row">
+          <button id="btnHuntPin2">Pin 4 working cameras</button>
+          <button id="btnHuntStart2">Hunt all 30</button>
+          <button class="secondary" id="btnHuntStop2">Stop hunt</button>
+        </div>
         <div id="capacityPanel" class="card muted">No capacity measurement yet.</div>
         <div class="row">
           <button id="btnMeasure">Measure government decode</button>

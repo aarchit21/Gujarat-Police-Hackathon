@@ -233,7 +233,12 @@ def test_catalogue_form_auth_logs_in_then_uses_session_cookie(monkeypatch):
     def handler(request: httpx.Request):
         calls.append((request.method, str(request.url), request.content))
         if request.url.path == "/auth/login":
+            if request.method == "GET":
+                return httpx.Response(200, text="<html><form><input name='email'><input name='password'></form></html>")
             assert request.method == "POST"
+            body = (request.content or b"").decode()
+            assert "email=" in body
+            assert "password=" in body
             return httpx.Response(302, headers={"set-cookie": "session=ok; Path=/", "location": "/resource"})
         if request.url.path == "/resource":
             return httpx.Response(200, text="ok")
@@ -241,16 +246,31 @@ def test_catalogue_form_auth_logs_in_then_uses_session_cookie(monkeypatch):
         return httpx.Response(200, json={"cameras": [{"id": "cam01"}]})
 
     monkeypatch.setattr("app.services.catalogue.settings.cctv_auth_mode", "form")
+    monkeypatch.setattr("app.services.catalogue.settings.cctv_access_username", "ops@example.com")
     monkeypatch.setattr("app.services.catalogue.settings.cctv_access_token", "secret")
     monkeypatch.setattr("app.services.catalogue.settings.cctv_login_url", "")
     with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
         payload = catalogue_get("https://cctv.test/cameras.json", client=client)
     assert payload["cameras"][0]["id"] == "cam01"
-    assert calls[0][0:2] == ("POST", "https://cctv.test/auth/login")
+    assert ("POST", "https://cctv.test/auth/login") in [c[0:2] for c in calls]
+
+
+def test_catalogue_form_auth_requires_email(monkeypatch):
+    monkeypatch.setattr("app.services.catalogue.settings.cctv_auth_mode", "form")
+    monkeypatch.setattr("app.services.catalogue.settings.cctv_access_username", "")
+    monkeypatch.setattr("app.services.catalogue.settings.cctv_access_token", "secret")
+    with httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(500))) as client:
+        try:
+            catalogue_get("https://cctv.test/cameras.json", client=client)
+        except ValueError as exc:
+            assert "USERNAME" in str(exc) or "email" in str(exc).lower()
+        else:
+            raise AssertionError("form login without email was accepted")
 
 
 def test_catalogue_form_auth_rejects_cross_origin_login(monkeypatch):
     monkeypatch.setattr("app.services.catalogue.settings.cctv_auth_mode", "form")
+    monkeypatch.setattr("app.services.catalogue.settings.cctv_access_username", "ops@example.com")
     monkeypatch.setattr("app.services.catalogue.settings.cctv_access_token", "secret")
     monkeypatch.setattr("app.services.catalogue.settings.cctv_login_url", "https://evil.test/auth/login")
     with httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(500))) as client:

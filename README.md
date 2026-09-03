@@ -77,6 +77,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 Leave that window open all day. Open http://127.0.0.1:8000
 
+**Hunt all 30 live feeds** (the government-catch path on this laptop): this host cannot decode 30 RTSP streams at once. Click **Hunt all 30 live feeds**. Four capture slots rotate (~12s each) so every live catalogue camera is visited each cycle. YOLO logs vehicles even when the plate is unreadable (night / distant PTZ). Ollama is called only when the vehicle box is wide enough. Coverage is `hunting 4 / visited N / 30`, not a fake 30/30 simultaneous decode.
+
 - **Monitor** — plate + optional date → numbered map, dashed inferred camera-to-camera links, OSM **snap-to-road** possible path (OSRM Match by default, not a proven route), CSV/GeoJSON export.
 - **Investigate** — time range → which cameras had analytics running (not a full-video archive).
 - **Alerts / Watchlist** — exact match only; own-feed `GJ01AB1234` is the guaranteed demo hit.
@@ -107,9 +109,18 @@ python scripts\verify_own_feed.py
 python -m pytest -q
 ```
 
-## Ollama vision ANPR
+## Live ANPR (YOLO detect → Ollama read)
 
-Tesseract is **not used**. Live and own-feed plate reads go through Ollama vision (`model_id=ollama:<model>`).
+1. **YOLOv8n** detects vehicles only (`car`, `motorcycle`, `bus`, `truck`). **Person is ignored.**
+2. The vehicle crop is sent to **Ollama** (Cloud `gemma4:31b` or local GPU) for plate + type/colour.
+3. A vehicle JSON row is stored. An **Alert** is created only on exact watchlist match.
+
+```powershell
+python -m pip install ultralytics
+python scripts\pull_yolo.py
+```
+
+First run downloads `yolov8n.pt` (~6 MB) into `data/models/` (gitignored). If ultralytics/torch is missing, the worker falls back to the OpenCV blob crop. YOLO and Cloud Ollama do not need to share this laptop's 1650: detection can use CUDA or CPU (`YOLO_DEVICE=auto`).
 
 **Local Ollama** (no API key):
 
@@ -144,7 +155,7 @@ Records use `model_id=ollama:<actual-model>`. The prompt never includes the watc
 - Exact normalised watchlist match
 - Evidence crop only
 
-Awiros, PP-OCRv5, YOLO and Tesseract are **not** the live OCR path.
+Tesseract is not used. YOLO is the vehicle detector; Ollama is the plate reader.
 
 ## Optional remote GPU provider
 

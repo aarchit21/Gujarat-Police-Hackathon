@@ -57,6 +57,7 @@ class Camera(Base):
     measured_worker_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
     measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     coords_source: Mapped[str] = mapped_column(String(24), default="")
+    last_hunted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     sightings: Mapped[list["Sighting"]] = relationship(back_populates="camera")
 

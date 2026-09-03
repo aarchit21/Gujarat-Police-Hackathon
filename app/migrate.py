@@ -37,6 +37,7 @@ CAMERA_COLUMNS = {
     "measured_worker_fps": ("DOUBLE PRECISION", "REAL"),
     "measured_at": ("TIMESTAMPTZ", "DATETIME"),
     "coords_source": ("VARCHAR(24) DEFAULT ''", "VARCHAR(24) DEFAULT ''"),
+    "last_hunted_at": ("TIMESTAMPTZ", "DATETIME"),
 }
 
 SIGHTING_COLUMNS = {
