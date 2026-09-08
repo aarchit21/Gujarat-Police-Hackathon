@@ -15,9 +15,13 @@ from sqlalchemy.orm import Session
 from app.auth import require_operator, require_vendor
 from app.config import ROOT, settings
 from app.database import SessionLocal, database_status, get_db, init_db
-from app.models import Alert, AuditEvent, Camera, Sighting, WatchlistEntry
+from app.models import Alert, AuditEvent, Camera, RecognitionAttempt, Sighting, VehicleObservation, WatchlistEntry
 from app.security import evidence_relpath_is_safe, redact_url
 from app.services.activity import cameras_active_at
+from app.services.anpr import enhancement_status
+from app.services.cpu_anpr import cpu_anpr_status
+from app.services.cloud_verifier_queue import cloud_verifier
+from app.services.recognition_diagnostics import diagnostics_snapshot, serialize_attempt
 from app.services.capacity import capacity_snapshot, measure_government_decode, start_accessible_workers
 from app.services.catalogue import backfill_catalogue_display, sync_catalogue
 from app.services.demo import autostart_if_configured
@@ -35,7 +39,21 @@ from app.services.processing import select_processing_route
 from app.services.reports import as_csv, as_json, sighting_rows
 from app.services.serialize import alert_json, camera_public, inferred_links, plate_keys, sighting_json
 from app.services.map_match import map_match_status
-from app.services.vehicle import vehicle_csv, vehicle_day, vehicle_geojson
+from app.services.vehicle import parse_time, vehicle_csv, vehicle_day, vehicle_geojson
+from app.services.vehicle_observations import (
+    VEHICLE_COLORS,
+    VEHICLE_TYPES,
+    observation_json,
+    observations_csv,
+    search_observations,
+)
+from app.services.recognition_policy import (
+    effective as plate_recognition_effective,
+    hydrate as hydrate_recognition_policy,
+    set_camera_mode,
+    set_global as set_plate_recognition_global,
+    snapshot as recognition_policy_snapshot,
+)
 from app.services.vendor import VendorIngestError, ingest_vendor_event
 from app.services.hunt import hunt_status, start_hunt, stop_hunt
 from app.services.workers import manager
@@ -49,6 +67,7 @@ async def lifespan(_app: FastAPI):
     db = SessionLocal()
     try:
         backfill_catalogue_display(db)
+        hydrate_recognition_policy(db)
         db.commit()
         autostart_if_configured(manager, db)
     finally:
@@ -79,6 +98,11 @@ class CameraPatch(BaseModel):
     network_class: str | None = None
     target_analysis_fps: float | None = None
     clock_offset_ms: float | None = None
+    plate_recognition_mode: str | None = None
+
+
+class RecognitionSettingsIn(BaseModel):
+    enabled: bool
 
 
 class WatchlistIn(BaseModel):
@@ -143,10 +167,20 @@ def health(db: Session = Depends(get_db)):
         "architecture": settings.architecture,
         "solo_p0": True,
         "analysis_fps_hypothesis": settings.analysis_fps,
-        "tesseract": "disabled",
+        "tesseract": "enabled as CPU fallback" if settings.cpu_anpr_tesseract_enabled else "disabled",
+        "cpu_anpr": cpu_anpr_status(),
+        "plate_recognition": recognition_policy_snapshot(db),
+        "recognition": diagnostics_snapshot(db),
+        "cloud_verifier_queue": cloud_verifier.status(),
         "database": database_status(),
         "remote_inference_configured": bool(settings.remote_inference_url),
         "ollama_vision": vision_status(),
+        "vision_enhancement": enhancement_status(),
+        "vision_only": {
+            "active": bool(getattr(manager, "vision_only", False)),
+            "models": [m.strip() for m in (settings.vision_only_models or "").split(",") if m.strip()],
+            "interval_seconds": settings.vision_only_interval_seconds,
+        },
         "yolo_detector": yolo_status(),
         "ingest_catalogue_url": redact_url(settings.ingest_catalogue_url),
         "catalogue_host": settings.catalogue_host(),
@@ -164,6 +198,98 @@ def health(db: Session = Depends(get_db)):
 @app.get("/api/coverage")
 def api_coverage(db: Session = Depends(get_db)):
     return _cov(db)
+
+
+@app.get("/api/settings/recognition")
+def get_recognition_settings(
+    db: Session = Depends(get_db),
+    _actor: str = Depends(require_operator),
+):
+    return recognition_policy_snapshot(db)
+
+
+@app.patch("/api/settings/recognition")
+def patch_recognition_settings(
+    body: RecognitionSettingsIn,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    enabled = set_plate_recognition_global(db, body.enabled)
+    db.add(AuditEvent(actor=actor, action="plate_recognition_toggle", detail=f"enabled={enabled}"))
+    db.commit()
+    return recognition_policy_snapshot(db)
+
+
+def _investigation_time(value: str, label: str):
+    try:
+        parsed = parse_time(value)
+    except ValueError as exc:
+        raise HTTPException(400, f"invalid {label} timestamp") from exc
+    if parsed is None:
+        raise HTTPException(400, f"{label} is required")
+    return parsed
+
+
+@app.get("/api/investigations/vehicles")
+def investigate_vehicles(
+    start: str,
+    end: str,
+    vehicle_type: str | None = None,
+    vehicle_color: str | None = None,
+    camera_id: str | None = None,
+    min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    sort: str = Query(default="asc", pattern="^(asc|desc)$"),
+    db: Session = Depends(get_db),
+):
+    from_dt, to_dt = _investigation_time(start, "start"), _investigation_time(end, "end")
+    if from_dt > to_dt:
+        raise HTTPException(400, "start must be before end")
+    return search_observations(
+        db, start=from_dt, end=to_dt, vehicle_type=vehicle_type, vehicle_color=vehicle_color,
+        camera_id=camera_id, min_confidence=min_confidence, limit=limit, offset=offset, sort=sort,
+    )
+
+
+@app.get("/api/investigations/vehicles/export.csv")
+def investigate_vehicles_csv(
+    start: str,
+    end: str,
+    vehicle_type: str | None = None,
+    vehicle_color: str | None = None,
+    camera_id: str | None = None,
+    min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    from_dt, to_dt = _investigation_time(start, "start"), _investigation_time(end, "end")
+    if from_dt > to_dt:
+        raise HTTPException(400, "start must be before end")
+    payload = search_observations(
+        db, start=from_dt, end=to_dt, vehicle_type=vehicle_type, vehicle_color=vehicle_color,
+        camera_id=camera_id, min_confidence=min_confidence, limit=500, offset=0, sort="asc",
+    )
+    db.add(AuditEvent(actor=actor, action="vehicle_investigation_csv", detail=f"{start}..{end}"))
+    db.commit()
+    return PlainTextResponse(observations_csv(payload), media_type="text/csv")
+
+
+@app.get("/api/vehicle-observations/{observation_id}")
+def vehicle_observation_detail(observation_id: int, db: Session = Depends(get_db)):
+    row = db.get(VehicleObservation, observation_id)
+    if row is None:
+        raise HTTPException(404, "vehicle observation not found")
+    return observation_json(row)
+
+
+@app.get("/api/vehicle-observation-options")
+def vehicle_observation_options(db: Session = Depends(get_db)):
+    return {
+        "vehicle_types": VEHICLE_TYPES,
+        "vehicle_colors": VEHICLE_COLORS,
+        "cameras": [{"id": c.id, "name": c.name, "city": c.city} for c in db.scalars(select(Camera).order_by(Camera.id))],
+    }
 
 
 @app.get("/api/cameras")
@@ -192,6 +318,11 @@ def patch_camera(
     data = body.model_dump(exclude_none=True)
     if "source_uri" in data:
         camera.protected_rtsp_url_or_reference = data["source_uri"]
+    if "plate_recognition_mode" in data:
+        try:
+            data["plate_recognition_mode"] = set_camera_mode(camera_id, data["plate_recognition_mode"])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     for field, value in data.items():
         setattr(camera, field, value)
     db.add(AuditEvent(actor=actor, action="camera_patch", detail=f"{camera_id} {data}"))
@@ -373,6 +504,24 @@ def list_sightings(
     return [sighting_json(s) for s in rows]
 
 
+@app.get("/api/recognition/diagnostics")
+def recognition_diagnostics(
+    camera_id: str | None = None,
+    reason: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _actor: str = Depends(require_operator),
+):
+    query = select(RecognitionAttempt)
+    if camera_id:
+        query = query.where(RecognitionAttempt.camera_id == camera_id)
+    if reason:
+        query = query.where(RecognitionAttempt.reason_code == reason)
+    query = query.order_by(RecognitionAttempt.id.desc()).limit(limit)
+    rows = list(db.scalars(query))
+    return {"summary": diagnostics_snapshot(db, limit=limit), "attempts": [serialize_attempt(row) for row in rows]}
+
+
 @app.get("/api/vehicles/{plate}")
 def vehicle_history(
     plate: str,
@@ -522,6 +671,7 @@ def api_hunt_status(db: Session = Depends(get_db)):
 class HuntStartIn(BaseModel):
     pinned_only: bool = False
     pin_ids: list[str] | None = None
+    vision_only: bool = False
 
 
 @app.post("/api/hunt/start")
@@ -537,6 +687,7 @@ def api_hunt_start(
         actor=actor,
         pinned_only=payload.pinned_only,
         pin_ids=payload.pin_ids,
+        vision_only=payload.vision_only,
     )
 
 
@@ -546,6 +697,14 @@ def api_hunt_pin(
     actor: str = Depends(require_operator),
 ):
     return start_hunt(manager, db, actor=actor, pinned_only=True)
+
+
+@app.post("/api/hunt/vision-only")
+def api_hunt_vision_only(
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_operator),
+):
+    return start_hunt(manager, db, actor=actor, pinned_only=True, vision_only=True)
 
 
 @app.post("/api/hunt/stop")

@@ -47,6 +47,7 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "priority_class": c.priority_class,
         "processing_mode": c.processing_mode,
         "analytics_policy": c.analytics_policy,
+        "plate_recognition_mode": getattr(c, "plate_recognition_mode", "inherit"),
         "compute_target": c.compute_target,
         "network_class": c.network_class,
         "target_analysis_fps": c.target_analysis_fps,
@@ -126,6 +127,7 @@ def sighting_json(s: Sighting) -> dict:
         "vehicle_make": getattr(s, "vehicle_make", "") or "",
         "vehicle_model": getattr(s, "vehicle_model", "") or "",
         "vehicle_color": getattr(s, "vehicle_color", "") or "",
+        "vehicle_observation_id": getattr(s, "vehicle_observation_id", None),
         "vehicle": event,
     }
 

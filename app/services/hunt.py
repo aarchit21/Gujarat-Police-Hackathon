@@ -59,6 +59,7 @@ def start_hunt(
     actor: str = "operator",
     pinned_only: bool = False,
     pin_ids: list[str] | None = None,
+    vision_only: bool = False,
 ) -> dict:
     targets = hunt_targets(db, pinned_only=pinned_only, pin_ids=pin_ids)
     promoted = []
@@ -67,6 +68,7 @@ def start_hunt(
             promoted.append(cam.id)
     db.commit()
 
+    manager.vision_only = bool(vision_only)
     manager.begin_hunt([c.id for c in targets])
 
     running = [
@@ -105,8 +107,12 @@ def start_hunt(
             "queued": queued,
             "failed": failed,
             "pinned_only": pinned_only,
+            "vision_only": bool(getattr(manager, "vision_only", False)),
             "disclaimer": (
+                "Vision-only A/B: full-frame Gemma then GLM 5.3 Flash. YOLO still runs. "
                 "Pinned to 4 working live cameras."
+                if vision_only
+                else "Pinned to 4 working live cameras."
                 if pinned_only
                 else "This host hunts 4 government streams at a time and visits all live catalogue "
                 "cameras each cycle. Not 30 simultaneous decodes. Not a central VMS."
@@ -149,6 +155,10 @@ def hunt_status(manager, db: Session) -> dict:
         for c in db.scalars(select(Camera).where(Camera.last_hunted_at.isnot(None)).order_by(Camera.last_hunted_at.desc()).limit(12))
     ]
     total = len(gov_ids)
+    vo = ""
+    if getattr(manager, "vision_only", False):
+        names = [m.strip() for m in (settings.vision_only_models or "").split(",") if m.strip()]
+        vo = " · vision-only " + (" then ".join(names) if names else "on")
     return {
         "enabled": bool(manager.hunt_enabled),
         "cycle_id": manager.hunt_cycle_id,
@@ -169,7 +179,7 @@ def hunt_status(manager, db: Session) -> dict:
         "last_hunted": last_hunted,
         "label": (
             f"Hunting {len(hunting)}/{total} · visited {len(visited)}/{total} this cycle · "
-            f"{vehicles} vehicles · {plates} plates"
+            f"{vehicles} vehicles · {plates} plates{vo}"
             if manager.hunt_enabled
             else "Hunt idle — this host can run 4 live streams at a time"
         ),

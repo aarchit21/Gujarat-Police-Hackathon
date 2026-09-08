@@ -3,7 +3,7 @@ from app.services.pipeline import persist_sighting
 from tests.conftest import add_camera, add_watchlist
 
 
-def test_rematch_creates_alert_from_existing_sighting(db):
+def test_rematch_rejects_hud_text_even_if_watchlisted(db):
     cam = add_camera(db, id="cam01", source_type="rtsp")
     persist_sighting(
         db,
@@ -26,7 +26,7 @@ def test_rematch_creates_alert_from_existing_sighting(db):
     wl = add_watchlist(db, plate="CSITMS")
     out = rematch_watchlist_entry(db, wl)
     db.commit()
-    assert out["alerts_created"] == 1
+    assert out["alerts_created"] == 0
     again = rematch_watchlist_entry(db, wl)
     assert again["alerts_created"] == 0
 

@@ -11,6 +11,7 @@ import numpy as np
 from app.config import settings
 
 MODEL_ID = "ollama-vision-p0"
+ENHANCEMENT_METHOD = "opencv-clahe-unsharp-v1"
 
 
 def local_model_hash() -> str:
@@ -202,29 +203,146 @@ def bumper_crop(bgr: np.ndarray, box: tuple[int, int, int, int] | None) -> np.nd
     return None if crop.size == 0 else crop
 
 
-def enhance_plate_crop(bgr: np.ndarray, min_width: int = 320) -> np.ndarray:
-    """Light upsample + CLAHE. Heavy denoise/unsharp smears plate strokes; do not invent pixels."""
+def enhancement_status() -> dict:
+    """Public, non-secret description of the deterministic vision preprocessor."""
+    return {
+        "enabled": bool(settings.vision_enhancement_enabled),
+        "method": ENHANCEMENT_METHOD,
+        "profiles": ["plate", "vehicle", "frame"],
+        "max_scale": 4.0,
+        "generative": False,
+    }
+
+
+def enhance_for_vision(
+    bgr: np.ndarray,
+    *,
+    profile: str,
+    min_width: int = 0,
+    max_scale: float = 4.0,
+) -> tuple[np.ndarray, dict]:
+    """Enhance observed pixels without reconstructing or inventing plate strokes."""
     if bgr is None or getattr(bgr, "size", 0) == 0:
-        return bgr
-    out = bgr
+        return bgr, {
+            "enabled": bool(settings.vision_enhancement_enabled),
+            "method": ENHANCEMENT_METHOD,
+            "profile": profile,
+            "input_width": 0,
+            "input_height": 0,
+            "output_width": 0,
+            "output_height": 0,
+            "scale": 1.0,
+            "view_count": 0,
+        }
+
+    h, w = bgr.shape[:2]
+    enabled = bool(settings.vision_enhancement_enabled)
+    meta = {
+        "enabled": enabled,
+        "method": ENHANCEMENT_METHOD if enabled else "none",
+        "profile": profile,
+        "input_width": int(w),
+        "input_height": int(h),
+        "output_width": int(w),
+        "output_height": int(h),
+        "scale": 1.0,
+        "view_count": 1,
+    }
+    out = bgr.copy()
+    if not enabled or w < 2 or h < 2:
+        return out, meta
+
     try:
-        h, w = out.shape[:2]
-        if w < 16 or h < 10:
-            return bgr
-        target = max(int(min_width or 320), 160)
-        if w < target:
-            scale = min(target / float(w), 8.0)
+        target = max(0, int(min_width or 0))
+        scale = min(max(1.0, target / float(w)), max(1.0, float(max_scale)))
+        if scale > 1.0:
+            interpolation = cv2.INTER_LANCZOS4 if scale >= 2.0 else cv2.INTER_CUBIC
             out = cv2.resize(
                 out,
-                (int(w * scale), int(h * scale)),
-                interpolation=cv2.INTER_CUBIC,
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                interpolation=interpolation,
             )
+
+        # Small OCR crops benefit from edge-preserving denoise. Applying this to a
+        # full CCTV frame is both expensive and more likely to erase distant strokes.
+        if profile == "plate" and min(out.shape[:2]) >= 12:
+            out = cv2.bilateralFilter(out, 5, 28, 28)
+
         lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)
         l_ch, a_ch, b_ch = cv2.split(lab)
-        l2 = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l_ch)
-        out = cv2.cvtColor(cv2.merge((l2, a_ch, b_ch)), cv2.COLOR_LAB2BGR)
+        clip = 2.2 if profile == "plate" else 1.6
+        grid = (8, 8) if profile == "plate" else (12, 12)
+        l_ch = cv2.createCLAHE(clipLimit=clip, tileGridSize=grid).apply(l_ch)
+        out = cv2.cvtColor(cv2.merge((l_ch, a_ch, b_ch)), cv2.COLOR_LAB2BGR)
+
+        # Conservative unsharp mask: clarify existing edges without generative SR.
+        blurred = cv2.GaussianBlur(out, (0, 0), 0.8 if profile == "plate" else 1.0)
+        amount = 0.28 if profile == "plate" else 0.18
+        out = cv2.addWeighted(out, 1.0 + amount, blurred, -amount, 0)
+        out = np.ascontiguousarray(out)
     except Exception:
-        return bgr
+        out = bgr.copy()
+
+    oh, ow = out.shape[:2]
+    meta.update(
+        {
+            "output_width": int(ow),
+            "output_height": int(oh),
+            "scale": round(float(ow) / float(w), 3),
+        }
+    )
+    return out, meta
+
+
+def vision_only_views(bgr: np.ndarray, *, max_width: int = 1280) -> tuple[list[np.ndarray], dict]:
+    """Return enhanced context plus two overlapping roadway zooms, without YOLO."""
+    if bgr is None or getattr(bgr, "size", 0) == 0:
+        return [], {
+            "enabled": bool(settings.vision_enhancement_enabled),
+            "method": ENHANCEMENT_METHOD,
+            "profile": "frame",
+            "view_count": 0,
+        }
+
+    frame = mask_hud(bgr)
+    h, w = frame.shape[:2]
+    limit = max(1, int(max_width or 1280))
+    if w > limit:
+        scale = limit / float(w)
+        frame = cv2.resize(frame, (limit, max(1, int(round(h * scale)))), interpolation=cv2.INTER_AREA)
+
+    context, meta = enhance_for_vision(frame, profile="frame")
+    views = [context]
+    if settings.vision_enhancement_enabled:
+        fh, fw = frame.shape[:2]
+        y0, y1 = int(0.12 * fh), max(int(0.90 * fh), int(0.12 * fh) + 1)
+        road = frame[y0:y1, :]
+        if road.size and fw >= 64 and road.shape[0] >= 32:
+            tile_w = min(fw, max(32, int(round(fw * 0.62))))
+            starts = (0, max(0, fw - tile_w))
+            for x0 in starts:
+                tile = road[:, x0 : x0 + tile_w]
+                zoom, _zoom_meta = enhance_for_vision(
+                    tile,
+                    profile="frame",
+                    min_width=limit,
+                )
+                views.append(zoom)
+
+    meta = {
+        **meta,
+        "view_count": len(views),
+        "views": [
+            {"width": int(view.shape[1]), "height": int(view.shape[0])}
+            for view in views
+        ],
+    }
+    return views, meta
+
+
+def enhance_plate_crop(bgr: np.ndarray, min_width: int = 320) -> np.ndarray:
+    """Backward-compatible plate enhancer used by existing callers and tests."""
+    out, _meta = enhance_for_vision(bgr, profile="plate", min_width=min_width)
     return out
 
 

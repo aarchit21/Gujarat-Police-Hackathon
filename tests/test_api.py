@@ -50,6 +50,13 @@ def test_health_exposes_sqlite_fallback_and_coverage():
         assert health["hardcoded_50"] is False
         assert health["own_feed_count"] == 1
         assert health["government_catalogue_count"] == 0
+        assert health["vision_enhancement"]["method"] == "opencv-clahe-unsharp-v1"
+        assert health["vision_enhancement"]["generative"] is False
+        assert health["cpu_anpr"]["execution_provider"] == "CPUExecutionProvider"
+        assert health["recognition"]["attempt_count"] == 0
+        diag = client.get("/api/recognition/diagnostics", headers={"Authorization": "Bearer p0-operator"})
+        assert diag.status_code == 200
+        assert diag.json()["attempts"] == []
         assert "cctv_access_token" not in health
         dumped = str(health)
         assert settings_token_absent(dumped)
@@ -91,6 +98,8 @@ def test_vendor_api_and_reports(tmp_path):
             "plate_raw": "GJ01AB1234",
             "confidence": 0.9,
             "vendor_model_id": "vendor-a",
+            "passage_id": "vendor-pass",
+            "frame_index": 0,
         }
         r = client.post("/api/vendor/events", json=body, headers={"Authorization": "Bearer p0-vendor"})
         assert r.status_code == 200
@@ -99,6 +108,9 @@ def test_vendor_api_and_reports(tmp_path):
         assert data["sighting_id"]
         dup = client.post("/api/vendor/events", json=body, headers={"Authorization": "Bearer p0-vendor"})
         assert dup.json()["duplicate"] is True
+        body2 = {**body, "event_id": "e2", "frame_index": 1, "source_time": "2026-09-01T10:00:00.200000Z"}
+        confirmed = client.post("/api/vendor/events", json=body2, headers={"Authorization": "Bearer p0-vendor"})
+        assert confirmed.json()["alert_created"] is True
         alerts = client.get("/api/alerts").json()
         assert len(alerts) == 1
         assert alerts[0]["plate_norm"] == "GJ01AB1234"

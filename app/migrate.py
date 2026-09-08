@@ -38,6 +38,7 @@ CAMERA_COLUMNS = {
     "measured_at": ("TIMESTAMPTZ", "DATETIME"),
     "coords_source": ("VARCHAR(24) DEFAULT ''", "VARCHAR(24) DEFAULT ''"),
     "last_hunted_at": ("TIMESTAMPTZ", "DATETIME"),
+    "plate_recognition_mode": ("VARCHAR(12) DEFAULT 'inherit'", "VARCHAR(12) DEFAULT 'inherit'"),
 }
 
 SIGHTING_COLUMNS = {
@@ -56,6 +57,7 @@ SIGHTING_COLUMNS = {
     "vehicle_model": ("VARCHAR(40) DEFAULT ''", "VARCHAR(40) DEFAULT ''"),
     "vehicle_color": ("VARCHAR(40) DEFAULT ''", "VARCHAR(40) DEFAULT ''"),
     "vehicle_json": ("JSONB", "TEXT DEFAULT ''"),
+    "vehicle_observation_id": ("INTEGER", "INTEGER"),
 }
 
 INDEX_SQL = [
@@ -68,6 +70,10 @@ INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_alerts_plate_norm ON alerts (plate_norm)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_alert_dedup ON alerts (watchlist_id, camera_id, passage_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_sightings_vendor_event ON sightings (vendor_event_id)",
+    "CREATE INDEX IF NOT EXISTS ix_sightings_vehicle_observation_id ON sightings (vehicle_observation_id)",
+    "CREATE INDEX IF NOT EXISTS ix_vehicle_observation_camera_time ON vehicle_observations (camera_id, first_seen_at)",
+    "CREATE INDEX IF NOT EXISTS ix_vehicle_observation_type_color_time ON vehicle_observations (vehicle_type, vehicle_color, first_seen_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_vehicle_observation_track ON vehicle_observations (camera_id, run_id, track_id)",
 ]
 
 
@@ -160,6 +166,53 @@ def _postgres_vehicle_jsonb(engine: Engine) -> bool:
 def _sqlite_empty_vehicle_json(engine: Engine) -> None:
     if _dialect(engine) != "sqlite":
         return
+
+
+def _backfill_vehicle_observations(engine: Engine) -> None:
+    """Create additive investigation records from existing attributed sightings."""
+    if "vehicle_observations" not in inspect(engine).get_table_names():
+        return
+    dialect = _dialect(engine)
+    insert_prefix = "INSERT OR IGNORE" if dialect == "sqlite" else "INSERT"
+    conflict = "" if dialect == "sqlite" else " ON CONFLICT (camera_id, run_id, track_id) DO NOTHING"
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                f"""
+                {insert_prefix} INTO vehicle_observations
+                (camera_id, run_id, track_id, first_seen_at, last_seen_at, first_pts_ms, last_pts_ms,
+                 best_frame_index, bbox_x, bbox_y, bbox_w, bbox_h, frame_width, frame_height,
+                 detector, detector_confidence, vehicle_type, type_confidence, type_source,
+                 vehicle_color, color_confidence, color_source, evidence_path, context_evidence_path, metadata_json, created_at, updated_at)
+                SELECT camera_id, COALESCE(run_id, ''), COALESCE(passage_id, 'legacy-' || id),
+                       source_time, source_time, source_pts_ms, source_pts_ms, frame_index,
+                       bbox_x, bbox_y, bbox_w, bbox_h, frame_width, frame_height,
+                       COALESCE(model_id, ''), COALESCE(confidence, 0),
+                       CASE WHEN COALESCE(vehicle_type, '') = '' THEN 'unknown' ELSE vehicle_type END,
+                       COALESCE(confidence, 0), 'legacy_sighting',
+                       CASE WHEN COALESCE(vehicle_color, '') = '' THEN 'unknown' ELSE vehicle_color END,
+                       0, 'legacy_sighting', COALESCE(evidence_path, ''), '', NULL, ingest_time, ingest_time
+                FROM sightings
+                WHERE COALESCE(vehicle_type, '') <> '' OR COALESCE(vehicle_color, '') <> ''
+                {conflict}
+                """
+            ))
+            conn.execute(text(
+                """
+                UPDATE sightings
+                SET vehicle_observation_id = (
+                    SELECT vo.id FROM vehicle_observations vo
+                    WHERE vo.camera_id = sightings.camera_id
+                      AND vo.run_id = COALESCE(sightings.run_id, '')
+                      AND vo.track_id = COALESCE(sightings.passage_id, 'legacy-' || sightings.id)
+                    LIMIT 1
+                )
+                WHERE vehicle_observation_id IS NULL
+                  AND (COALESCE(vehicle_type, '') <> '' OR COALESCE(vehicle_color, '') <> '')
+                """
+            ))
+    except Exception:
+        return
     try:
         with engine.begin() as conn:
             conn.execute(text("UPDATE sightings SET vehicle_json = NULL WHERE vehicle_json IS NULL OR trim(vehicle_json) = ''"))
@@ -173,6 +226,7 @@ def apply_migrations(engine: Engine) -> dict:
     added.extend(_add_columns(engine, "sightings", SIGHTING_COLUMNS))
     _postgres_vehicle_jsonb(engine)
     _sqlite_empty_vehicle_json(engine)
+    _backfill_vehicle_observations(engine)
     with engine.begin() as conn:
         for stmt in INDEX_SQL:
             try:

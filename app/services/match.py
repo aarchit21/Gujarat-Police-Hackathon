@@ -19,6 +19,14 @@ def exact_watchlist(db: Session, plate_norm: str) -> WatchlistEntry | None:
     )
 
 
+def approved_special_format(db: Session, plate_norm: str) -> bool:
+    """Explicit operator escape hatch for authoritative non-standard plates."""
+    entry = exact_watchlist(db, plate_norm)
+    if entry is None or (entry.authority or "").lower().startswith("demo"):
+        return False
+    return "allow-special-format=true" in (entry.notes or "").lower()
+
+
 def open_alert(
     db: Session,
     *,
@@ -54,16 +62,15 @@ def open_alert(
 
 
 def match_sighting(db: Session, sighting) -> tuple[object | None, bool]:
-    from app.services.plates import layout_hint
-
     if not getattr(sighting, "id", None):
         raise ValueError("match_sighting requires a persisted Sighting row")
-    keys = {
-        sighting.plate_norm,
-        sighting.plate_voted,
-        layout_hint(sighting.plate_norm or ""),
-        layout_hint(sighting.plate_voted or ""),
-    }
+    vehicle_json = sighting.vehicle_json if isinstance(sighting.vehicle_json, dict) else {}
+    confirmation = vehicle_json.get("confirmation") if isinstance(vehicle_json, dict) else {}
+    if not isinstance(confirmation, dict) or confirmation.get("status") != "confirmed":
+        return None, False
+    # Exact observed values only. Layout O/0/I/1 hints belong in review and can
+    # never silently become the automatic watchlist key.
+    keys = {sighting.plate_norm, sighting.plate_voted}
     for key in keys:
         hit = exact_watchlist(db, key)
         if hit:
@@ -90,6 +97,9 @@ def rematch_watchlist_entry(db: Session, watchlist: WatchlistEntry) -> dict:
     target = normalize(watchlist.plate_norm)
     for sighting in sightings:
         scanned += 1
+        blob = sighting.vehicle_json if isinstance(sighting.vehicle_json, dict) else {}
+        if (blob.get("confirmation") or {}).get("status") != "confirmed":
+            continue
         if target not in plate_keys(sighting):
             continue
         _alert, new = open_alert(

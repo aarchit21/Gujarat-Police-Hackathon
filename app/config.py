@@ -28,6 +28,33 @@ class Settings(BaseSettings):
     analysis_fps: float = 2.0
     min_plate_width_px: int = 24
     min_vision_box_px: int = 24
+    cpu_anpr_enabled: bool = True
+    # Master safety default for the optional plate-recognition branch.  The
+    # persisted runtime value in system_state takes precedence after first use.
+    plate_recognition_enabled: bool = False
+    cpu_anpr_models_ready: bool = False
+    cpu_anpr_tesseract_enabled: bool = True
+    cpu_anpr_secondary_tesseract: bool = True
+    cpu_anpr_secondary_trigger_confidence: float = 0.98
+    cpu_anpr_detector_model: str = "yolo-v9-t-384-license-plate-end2end"
+    cpu_anpr_ocr_model: str = "cct-s-v2-global-model"
+    cpu_anpr_min_plate_width_px: int = 48
+    cpu_anpr_min_plate_height_px: int = 14
+    # A local plate detector must identify a plate with this confidence before a
+    # live crop can be OCRed or sent to the optional cloud verifier.
+    cpu_anpr_min_detector_confidence: float = 0.35
+    cpu_anpr_workers: int = 1
+    plate_track_iou_threshold: float = 0.25
+    plate_track_max_gap_seconds: float = 1.5
+    plate_track_best_crops: int = 5
+    active_track_fps_multiplier: float = 2.0
+    active_track_max_fps: float = 6.0
+    active_track_hold_seconds: float = 1.5
+    plate_confirmation_min_frames: int = 2
+    plate_confirmation_min_gap_ms: float = 100.0
+    plate_confirmation_median_confidence: float = 0.75
+    plate_confirmation_min_char_confidence: float = 0.55
+    recognition_attempt_retention_per_track: int = 20
     passage_gap_ms: float = 3000.0
     pts_jump_reset_ms: float = 5000.0
     inference_max_width: int = 1280
@@ -60,12 +87,25 @@ class Settings(BaseSettings):
     ollama_vision_max_width: int = 768
     ollama_live_interval_seconds: float = 0.4
     ollama_lock_wait_seconds: float = 25.0
+    cloud_verifier_queue_enabled: bool = True
+    cloud_verifier_queue_size: int = 8
+    cloud_verifier_max_age_seconds: float = 12.0
+    vision_enhancement_enabled: bool = True
+    vision_only_enabled: bool = False
+    vision_only_interval_seconds: float = 8.0
+    vision_only_models: str = "gemma4:31b,glm-5.3-flash"  # qwen2.5vl is not on Ollama Cloud
 
     yolo_enabled: bool = True
     yolo_weights: str = "yolov8n.pt"
     yolo_device: str = "auto"
     yolo_conf: float = 0.35
     yolo_max_crops: int = 2
+    vehicle_max_detections: int = 8
+    vehicle_attribute_refinement_enabled: bool = True
+    vehicle_attribute_model: str = "gemma4:31b"
+    vehicle_attribute_queue_size: int = 16
+    vehicle_attribute_max_age_seconds: float = 20.0
+    vehicle_attribute_min_confidence: float = 0.65
     # Hunt: 4 capture slots rotate across all live catalogue cameras.
     hunt_dwell_seconds: float = 28.0
     hunt_max_frames: int = 40

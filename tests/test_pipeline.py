@@ -3,9 +3,10 @@ from datetime import datetime, timezone
 import numpy as np
 from sqlalchemy import func, select
 
-from app.models import Alert, Sighting
+from app.models import Alert, RecognitionAttempt, Sighting
 from app.services.match import match_sighting
-from app.services.pipeline import persist_sighting, process_frame_iter
+from app.services.cpu_anpr import CpuPlateCandidate
+from app.services.pipeline import _read_plate, persist_sighting, process_frame_iter
 from app.services.serialize import inferred_links, plate_keys
 from tests.conftest import add_camera, add_watchlist, fake_read
 
@@ -31,9 +32,19 @@ def test_alert_only_after_sighting_persistence(db):
         provider="local",
     )
     assert sighting.id is not None
+    assert created is False
+    assert alert is None
+    assert sighting.vehicle_json["confirmation"]["status"] == "pending"
+    second, alert, created = persist_sighting(
+        db, cam, plate_raw="GJ01AB1234", plate_norm="GJ01AB1234",
+        plate_voted="GJ01AB1234", syntax=True, confidence=0.9,
+        model_id="tesseract-opencv-p0", model_hash="abc", evidence_path="evidence/y.jpg",
+        run_id="run1", frame_index=1, passage_id="p1", source_pts_ms=200.0, provider="local",
+    )
     assert created is True
     assert alert is not None
-    assert alert.sighting_id == sighting.id
+    assert alert.sighting_id == second.id
+    assert second.vehicle_json["confirmation"]["support_count"] == 2
 
 
 def test_alert_deduplication(db):
@@ -137,6 +148,55 @@ def test_process_frames_pts_sampling_and_irregular_gaps(db):
     assert out["frames_sampled"] < 7
     assert out["sightings"] >= 1
     assert cam.analytics_active is False
+    assert db.scalar(select(func.count(RecognitionAttempt.id))) >= 1
+
+
+def test_low_confidence_or_same_frame_cannot_confirm(db):
+    cam = add_camera(db)
+    add_watchlist(db)
+    for frame_index, pts, confidence in [(0, 100.0, 0.9), (0, 100.0, 0.9), (1, 300.0, 0.5)]:
+        persist_sighting(
+            db, cam, plate_raw="GJ01AB1234", plate_norm="GJ01AB1234",
+            plate_voted="GJ01AB1234", syntax=True, confidence=confidence,
+            model_id="reader", model_hash="x", evidence_path="", run_id="r",
+            frame_index=frame_index, passage_id="track", source_pts_ms=pts, provider="local",
+        )
+    db.commit()
+    assert db.scalar(select(func.count(Alert.id))) == 0
+
+
+def test_layout_hint_never_becomes_automatic_match(db):
+    cam = add_camera(db)
+    add_watchlist(db, plate="GJ01AB1234")
+    # Directly exercising match requires confirmed persisted evidence; even then
+    # GJG1... must not be converted to GJ01... for automatic matching.
+    for frame, pts in [(0, 0.0), (1, 200.0)]:
+        persist_sighting(
+            db, cam, plate_raw="GJG1AB1234", plate_norm="GJG1AB1234",
+            plate_voted="GJG1AB1234", syntax=False, confidence=0.99,
+            model_id="reader", model_hash="x", evidence_path="", run_id="r",
+            frame_index=frame, passage_id="track-hint", source_pts_ms=pts, provider="local",
+        )
+    db.commit()
+    assert db.scalar(select(func.count(Alert.id))) == 0
+
+
+def test_authoritative_special_format_requires_explicit_marker_and_two_frames(db):
+    cam = add_camera(db)
+    watch = add_watchlist(db, plate="MIL12345")
+    watch.authority = "Gujarat Police authorised test"
+    watch.notes = "allow-special-format=true"
+    db.commit()
+    for frame, pts in [(0, 0.0), (1, 200.0)]:
+        _sighting, _alert, created = persist_sighting(
+            db, cam, plate_raw="MIL12345", plate_norm="MIL12345",
+            plate_voted="MIL12345", syntax=False, confidence=0.95,
+            model_id="reader", model_hash="x", evidence_path="", run_id="r",
+            frame_index=frame, passage_id="special-track", source_pts_ms=pts, provider="local",
+        )
+    db.commit()
+    assert created is True
+    assert db.scalar(select(func.count(Alert.id))) == 1
 
 
 def test_pts_regression_resets_passage(db):
@@ -156,3 +216,35 @@ def test_pts_regression_resets_passage(db):
 def test_plate_keys_include_voted():
     s = Sighting(plate_norm="GJG1AB1234", plate_voted="GJ01AB1234")
     assert "GJ01AB1234" in plate_keys(s)
+
+
+def test_live_plate_localization_uses_fast_alpr_on_vehicle_crop_only(db, monkeypatch):
+    cam = add_camera(db, source_type="rtsp")
+    frame = np.zeros((160, 320, 3), dtype=np.uint8)
+    vehicle = frame[40:140, 80:260]
+    calls = []
+    candidate = CpuPlateCandidate(
+        plate_raw="GJ01AB1234", plate_norm="GJ01AB1234", confidence=0.95,
+        character_confidences=[0.95] * 10, crop_bgr=np.full((30, 120, 3), 220, np.uint8),
+        box=(20, 50, 120, 30), detector="fast_alpr", recognizer="fast_plate_ocr",
+        detector_confidence=0.8,
+        quality={"eligible": True, "score": 0.9},
+    )
+
+    def fake_cpu(image, *, allow_opencv_fallback=True, **_kwargs):
+        calls.append((image.shape, allow_opencv_fallback))
+        return [candidate] if image.shape == vehicle.shape else []
+
+    monkeypatch.setattr("app.services.pipeline.cpu_plate_candidates", fake_cpu)
+    monkeypatch.setattr(
+        "app.services.pipeline.anpr_crops",
+        lambda _frame, **_kwargs: [{
+            "crop": vehicle, "body_crop": vehicle, "plate_crops": [],
+            "box": (80, 40, 180, 100), "vehicle_type": "car", "detector": "yolov8n",
+        }],
+    )
+    out = _read_plate(cam, frame, provider_kind="local_worker", reader=None, remote_client=None, local_hash="x", allow_cloud=False)
+    assert calls == [(frame.shape, False), (vehicle.shape, False)]
+    assert out["detector"] == "fast_alpr"
+    assert out["box"] == (100, 90, 120, 30)
+    assert out["localization_accepted"] is True

@@ -16,6 +16,7 @@ from app.services.activity import close_activity, open_activity
 from app.security import hls_requires_server_credential, redact_url
 from app.services.ingest import CaptureRegistry, SourceOpenError, diagnostics, open_video_source, rtsp_url_for
 from app.services.pipeline import FrameProcessor, iter_camera_frames, process_frame_iter
+from app.services.recognition_diagnostics import count_event
 from app.services.processing import select_processing_route
 from app.services.snapshot import maybe_save_live_preview
 from app.services.timing import backoff_seconds
@@ -59,6 +60,7 @@ class WorkerManager:
         self.hunt_cycle = 0
         self.hunt_target_ids: set[str] = set()
         self.hunt_visited: set[str] = set()
+        self.vision_only = False
         self.open_fn = open_video_source
         self.sleep_fn: Callable[[float], None] = time.sleep
         self.now_fn: Callable[[], float] = time.monotonic
@@ -117,6 +119,7 @@ class WorkerManager:
             self.hunt_enabled = False
             self.hunt_target_ids = set()
             self.hunt_visited = set()
+            self.vision_only = False
             self._queue = [cid for cid in self._queue if cid not in ids]
 
     def mark_hunted(self, camera_id: str) -> None:
@@ -402,6 +405,8 @@ def run_live_loop(
         try:
             opened = open_fn(camera)
         except SourceOpenError as exc:
+            count_event("decode_failed")
+            count_event("reconnect")
             attempt += 1
             camera.reconnect_count = (camera.reconnect_count or 0) + 1
             if (camera.decode_status or "") != "ok":
@@ -420,6 +425,7 @@ def run_live_loop(
             _sleep_backoff(stop, sleep_fn, attempt)
             continue
         except Exception as exc:
+            count_event("worker_failure")
             attempt += 1
             camera.analytics_active = False
             camera.last_error = str(exc)
@@ -463,8 +469,15 @@ def run_live_loop(
                 if process_fn:
                     process_fn(frame, pts)
                 elif processor is not None:
-                    processor.push(processed, frame, pts)
-                    db.commit()
+                    try:
+                        processor.push(processed, frame, pts)
+                        db.commit()
+                    except Exception as exc:
+                        count_event("persistence_error")
+                        db.rollback()
+                        camera.last_error = f"frame processing recovered: {exc}"[:2000]
+                        db.add(AuditEvent(action="frame_processing_error", detail=f"{camera.id}: {exc}"[:2000]))
+                        db.commit()
                 processed += 1
                 state.frames = processed
                 state.last_pts_ms = pts

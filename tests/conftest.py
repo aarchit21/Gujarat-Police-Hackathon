@@ -11,6 +11,18 @@ from app.services.anpr import PlateRead
 from app.services.plates import normalize
 
 
+@pytest.fixture(autouse=True)
+def disable_external_cloud_queue(monkeypatch):
+    """Unit tests never start a real background Ollama request."""
+    monkeypatch.setattr(settings, "cloud_verifier_queue_enabled", False)
+    monkeypatch.setattr("app.services.ollama_vision._cloud_disabled_reason", "")
+    # Existing ANPR tests exercise the legacy plate path explicitly.  Production
+    # first-run behaviour remains off and is covered by vehicle-first tests.
+    monkeypatch.setattr(settings, "plate_recognition_enabled", True)
+    monkeypatch.setattr("app.services.recognition_policy._enabled", None)
+    monkeypatch.setattr("app.services.recognition_policy._camera_modes", {})
+
+
 @pytest.fixture
 def db(tmp_path, monkeypatch) -> Session:
     ev = tmp_path / "evidence"

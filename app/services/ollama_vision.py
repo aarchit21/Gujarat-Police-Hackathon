@@ -21,6 +21,7 @@ import numpy as np
 
 from app.config import settings
 from app.security import redact_secrets
+from app.services.anpr import ENHANCEMENT_METHOD, enhance_for_vision, enhancement_status, vision_only_views
 from app.services.plates import normalize
 from app.services.vehicle_event import VEHICLE_PROMPT, parse_vehicle_payload
 
@@ -54,6 +55,23 @@ PLATE_PROMPT = (
     "Do not guess a typical or example plate. Do not describe people."
 )
 
+MULTIVIEW_VEHICLE_PROMPT = (
+    VEHICLE_PROMPT
+    + " The attached images are deterministic context and overlapping zoom views from the same frame. "
+    "Use the zoom views only to inspect observed pixels. Return an empty plate_text unless the same "
+    "characters are consistently visible; enhancement does not create missing detail."
+)
+
+VEHICLE_ATTRIBUTE_PROMPT = (
+    "You are analysing one cropped traffic-camera vehicle image in India. "
+    "Return JSON only, no markdown: "
+    '{"vehicle_type":"car|suv|two_wheeler|truck|bus|van|auto_rickshaw|taxi_cab|unknown",'
+    '"color":"white|black|silver|gray|red|blue|green|yellow|orange|brown|other|unknown","confidence":0.0}. '
+    "Do not read, transcribe, infer, or return any number plate. "
+    "Use taxi_cab only when a visible taxi marking supports it; otherwise use car. "
+    "If the vehicle or its body colour is unclear, use unknown. Do not describe people."
+)
+
 
 class OllamaVisionError(RuntimeError):
     def __init__(self, message: str):
@@ -68,6 +86,7 @@ class VisionRead:
     model_id: str
     model_hash: str
     raw_text: str
+    enhancement: dict
 
 
 def normalize_ollama_base(url: str | None = None) -> str:
@@ -218,13 +237,17 @@ def _disable_cloud(reason: str) -> None:
     _cloud_disabled_reason = reason[:200]
 
 
-def _local_generate(http: httpx.Client, base: str, model: str, image_b64: str, prompt: str) -> dict:
+def _image_list(image_b64: str | list[str]) -> list[str]:
+    return image_b64 if isinstance(image_b64, list) else [image_b64]
+
+
+def _local_generate(http: httpx.Client, base: str, model: str, image_b64: str | list[str], prompt: str) -> dict:
     response = http.post(
         base + "/api/generate",
         json={
             "model": model,
             "prompt": prompt,
-            "images": [image_b64],
+            "images": _image_list(image_b64),
             "stream": False,
             "format": "json",
         },
@@ -242,7 +265,39 @@ def _cloud_model_candidates(chosen: str) -> list[str]:
     return out
 
 
-def _cloud_chat_fallback(http: httpx.Client, base: str, chosen: str, image_b64: str, prompt: str) -> tuple[dict, str]:
+def _named_cloud_aliases(name: str) -> list[str]:
+    """Ollama Cloud accepts both glm-5.3-flash and glm-5.3-flash:cloud."""
+    n = (name or "").strip()
+    if not n:
+        return []
+    out = [n]
+    if not n.endswith(":cloud"):
+        out.append(f"{n}:cloud")
+    return out
+
+
+def _named_cloud_chat(
+    http: httpx.Client, base: str, name: str, image_b64: str | list[str], prompt: str
+) -> tuple[dict, str]:
+    """Retry the :cloud tag on 404/410. Does not fall back to Gemma."""
+    last: Exception | None = None
+    for candidate in _named_cloud_aliases(name):
+        try:
+            return _cloud_chat(http, base, candidate, image_b64, prompt), candidate
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status in {404, 410}:
+                last = exc
+                continue
+            raise
+    if last:
+        raise last
+    raise OllamaVisionError("named Cloud vision model unavailable")
+
+
+def _cloud_chat_fallback(
+    http: httpx.Client, base: str, chosen: str, image_b64: str | list[str], prompt: str
+) -> tuple[dict, str]:
     last: Exception | None = None
     for model in _cloud_model_candidates(chosen):
         try:
@@ -258,13 +313,15 @@ def _cloud_chat_fallback(http: httpx.Client, base: str, chosen: str, image_b64: 
     raise OllamaVisionError("no Cloud vision model responded")
 
 
-def _cloud_chat(http: httpx.Client, base: str, model: str, image_b64: str, prompt: str) -> dict:
+def _cloud_chat(
+    http: httpx.Client, base: str, model: str, image_b64: str | list[str], prompt: str
+) -> dict:
     """Ollama Cloud documents /api/chat for vision. /api/generate on retired models returns 410."""
     response = http.post(
         base + "/api/chat",
         json={
             "model": model,
-            "messages": [{"role": "user", "content": prompt, "images": [image_b64]}],
+            "messages": [{"role": "user", "content": prompt, "images": _image_list(image_b64)}],
             "stream": False,
             "format": "json",
         },
@@ -286,6 +343,8 @@ def infer_bgr(
     *,
     client: httpx.Client | None = None,
     model: str | None = None,
+    prepared: bool = False,
+    enhancement: dict | None = None,
 ) -> VisionRead:
     if not settings.ollama_vision_enabled:
         raise OllamaVisionError("Ollama vision is disabled")
@@ -299,7 +358,12 @@ def infer_bgr(
     chosen = model or resolve_vision_model()
     if is_cloud_url(base) and any(chosen.startswith(prefix) for prefix in RETIRED_CLOUD_PREFIXES):
         chosen = CLOUD_DEFAULT_MODEL
-    image_b64 = encode_jpeg_b64(bgr)
+    if prepared:
+        frame = bgr
+        enhancement_meta = dict(enhancement or {})
+    else:
+        frame, enhancement_meta = enhance_for_vision(bgr, profile="plate", min_width=400)
+    image_b64 = encode_jpeg_b64(frame)
     own = client is None
     http = client or httpx.Client(timeout=settings.ollama_vision_timeout_seconds)
     try:
@@ -330,7 +394,134 @@ def infer_bgr(
         model_id=f"ollama:{chosen}",
         model_hash=digest[:64],
         raw_text=text[:500],
+        enhancement=enhancement_meta,
     )
+
+
+def vision_only_model_list() -> list[str]:
+    raw = (getattr(settings, "vision_only_models", None) or "gemma4:31b,glm-5.3-flash")
+    out: list[str] = []
+    for part in str(raw).split(","):
+        name = part.strip()
+        if name and name not in out:
+            out.append(name)
+    return out or ["gemma4:31b", "glm-5.3-flash"]
+
+
+def infer_named_vision(
+    bgr: np.ndarray | list[np.ndarray],
+    *,
+    model: str,
+    max_width: int = 1280,
+    client: httpx.Client | None = None,
+) -> dict:
+    """Call one named vision model. 404 → skipped unavailable. Does not fall back to Gemma."""
+    name = (model or "").strip()
+    if not name:
+        return {"plate_norm": "", "skipped": "no_model", "model_id": ""}
+    wait = float(getattr(settings, "ollama_lock_wait_seconds", 25.0) or 25.0)
+    if not _vehicle_lock.acquire(timeout=max(1.0, wait)):
+        return {"plate_norm": "", "skipped": "busy", "model_id": f"ollama:{name}"}
+    try:
+        if not settings.ollama_vision_enabled:
+            return {"plate_norm": "", "skipped": "disabled", "model_id": f"ollama:{name}"}
+        if _cloud_disabled_reason:
+            return {"plate_norm": "", "skipped": "cloud_disabled", "model_id": f"ollama:{name}"}
+        base = effective_ollama_url()
+        if not ollama_host_allowed(base):
+            raise OllamaVisionError("OLLAMA_URL host is not local or ollama.com")
+        if is_cloud_url(base) and not (settings.ollama_api_key or "").strip():
+            raise OllamaVisionError("OLLAMA_API_KEY is required for Ollama Cloud")
+        if isinstance(bgr, list):
+            frames = bgr
+            enhancement_meta = {
+                "enabled": bool(settings.vision_enhancement_enabled),
+                "method": ENHANCEMENT_METHOD if settings.vision_enhancement_enabled else "none",
+                "profile": "frame",
+                "view_count": len(frames),
+            }
+            prompt = MULTIVIEW_VEHICLE_PROMPT
+        else:
+            frame, enhancement_meta = enhance_for_vision(bgr, profile="frame")
+            frames = [frame]
+            prompt = VEHICLE_PROMPT
+        image_b64 = [encode_jpeg_b64(frame, max_width=max_width) for frame in frames]
+        own = client is None
+        http = client or httpx.Client(timeout=min(45.0, settings.ollama_vision_timeout_seconds))
+        try:
+            if is_cloud_url(base):
+                payload, name = _named_cloud_chat(http, base, name, image_b64, prompt)
+            else:
+                payload = _local_generate(http, base, name, image_b64, prompt)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status in {404, 410}:
+                return {
+                    "plate_norm": "",
+                    "skipped": "unavailable",
+                    "model_id": f"ollama:{name}",
+                    "error": f"HTTP {status}",
+                }
+            if status in {401, 403}:
+                _disable_cloud(f"Ollama Cloud HTTP {status}; check OLLAMA_API_KEY")
+            raise
+        finally:
+            if own:
+                http.close()
+        response_text = _response_text(payload)
+        parsed = parse_vehicle_payload(response_text)
+        parsed["model_id"] = f"ollama:{name}"
+        parsed["model_hash"] = str(payload.get("model") or name)[:64]
+        parsed["provider"] = "ollama_vision_only"
+        parsed["skipped"] = ""
+        parsed["enhancement"] = enhancement_meta
+        return parsed
+    except httpx.TimeoutException:
+        return {"plate_norm": "", "skipped": "timeout", "model_id": f"ollama:{name}"}
+    except OllamaVisionError as exc:
+        return {"plate_norm": "", "skipped": "error", "model_id": f"ollama:{name}", "error": str(exc)[:200]}
+    except httpx.HTTPError as exc:
+        return {"plate_norm": "", "skipped": "error", "model_id": f"ollama:{name}", "error": redact_secrets(str(exc))[:200]}
+    finally:
+        _vehicle_lock.release()
+
+
+def infer_vision_only_frame(bgr: np.ndarray, *, camera_id: str = "") -> dict:
+    """Full-frame vision A/B. No YOLO. Gemma first, then GLM 5.3 Flash if no recordable plate."""
+    from app.services.vehicle_event import is_recordable_plate
+
+    if bgr is None or getattr(bgr, "size", 0) == 0:
+        return {"models": {}, "error": "empty"}
+    views, enhancement = vision_only_views(bgr, max_width=1280)
+    out: dict = {
+        "models": {},
+        "chosen_plate": "",
+        "chosen_model": "",
+        "enhancement": enhancement,
+        "_evidence_bgr": views[0] if views else None,
+    }
+    vision_input: np.ndarray | list[np.ndarray] = views if settings.vision_enhancement_enabled else views[0]
+    for name in vision_only_model_list():
+        hit = infer_named_vision(vision_input, model=name, max_width=1280)
+        key = name.replace(":", "_")
+        out["models"][key] = {
+            "model": name,
+            "plate_text": hit.get("plate_raw") or hit.get("plate_norm") or "",
+            "plate_norm": hit.get("plate_norm") or "",
+            "skipped": hit.get("skipped") or "",
+            "type": hit.get("vehicle_type") or "",
+            "color": hit.get("vehicle_color") or "",
+            "model_id": hit.get("model_id") or f"ollama:{name}",
+            "enhancement": enhancement,
+            "confidence": hit.get("confidence") or 0.0,
+            "parse_status": hit.get("parse_status") or "",
+            "raw_response": hit.get("raw_response") or "",
+        }
+        if is_recordable_plate(hit.get("plate_norm")):
+            out["chosen_plate"] = hit.get("plate_norm") or ""
+            out["chosen_model"] = name
+            break
+    return out
 
 
 def infer_vehicle(
@@ -339,6 +530,9 @@ def infer_vehicle(
     camera_id: str = "",
     client: httpx.Client | None = None,
     model: str | None = None,
+    prepared: bool = False,
+    enhancement: dict | None = None,
+    attributes_only: bool = False,
 ) -> dict:
     """Vision-first vehicle record. Empty plate_norm means do not persist."""
     gap = float(getattr(settings, "ollama_live_interval_seconds", 0.4) or 0.4)
@@ -360,24 +554,32 @@ def infer_vehicle(
             raise OllamaVisionError("OLLAMA_URL host is not local or ollama.com")
         if is_cloud_url(base) and not (settings.ollama_api_key or "").strip():
             raise OllamaVisionError("OLLAMA_API_KEY is required for Ollama Cloud")
-        chosen = model or resolve_vision_model()
+        chosen = model or (settings.vehicle_attribute_model if attributes_only else resolve_vision_model())
         if is_cloud_url(base) and any(chosen.startswith(prefix) for prefix in RETIRED_CLOUD_PREFIXES):
             chosen = CLOUD_DEFAULT_MODEL
-        image_b64 = encode_jpeg_b64(bgr, max_width=1024)
+        if prepared:
+            frame = bgr
+            enhancement_meta = dict(enhancement or {})
+        else:
+            frame, enhancement_meta = enhance_for_vision(bgr, profile="vehicle", min_width=320)
+        image_b64 = encode_jpeg_b64(frame, max_width=1024)
         own = client is None
         http = client or httpx.Client(timeout=min(25.0, settings.ollama_vision_timeout_seconds))
         try:
+            prompt = VEHICLE_ATTRIBUTE_PROMPT if attributes_only else VEHICLE_PROMPT
             if is_cloud_url(base):
-                payload, chosen = _cloud_chat_fallback(http, base, chosen, image_b64, VEHICLE_PROMPT)
+                payload, chosen = _cloud_chat_fallback(http, base, chosen, image_b64, prompt)
             else:
-                payload = _local_generate(http, base, chosen, image_b64, VEHICLE_PROMPT)
+                payload = _local_generate(http, base, chosen, image_b64, prompt)
         finally:
             if own:
                 http.close()
-        parsed = parse_vehicle_payload(_response_text(payload))
+        response_text = _response_text(payload)
+        parsed = parse_vehicle_payload(response_text)
         parsed["model_id"] = f"ollama:{chosen}"
         parsed["model_hash"] = str(payload.get("model") or chosen)[:64]
         parsed["provider"] = "ollama_vision"
+        parsed["enhancement"] = enhancement_meta
         return parsed
     except httpx.TimeoutException as exc:
         raise OllamaVisionError("ollama vision timeout") from exc
@@ -431,6 +633,7 @@ def vision_status() -> dict:
         "reachable": False,
         "live": False,
         "available_vision": [],
+        "enhancement": enhancement_status(),
         "error": "",
         "label": "Ollama off",
     }
@@ -444,7 +647,7 @@ def vision_status() -> dict:
         out["available_vision"] = [
             n
             for n in names
-            if n in VISION_CANDIDATES or n.startswith(("llava", "gemma3", "gemma4", "qwen3-vl", "moondream"))
+            if n in VISION_CANDIDATES or n.startswith(("llava", "gemma3", "gemma4", "qwen3-vl", "qwen2.5vl", "glm-5.3", "glm-5", "moondream"))
         ]
         out["resolved_model"] = resolve_vision_model(names)
     except Exception as exc:

@@ -3,7 +3,8 @@ import threading
 import numpy as np
 from sqlalchemy import func, select
 
-from app.models import Alert, Sighting
+from app.config import settings
+from app.models import Alert, RecognitionAttempt, Sighting
 from app.services.hunt import hunt_targets, PIN_DEFAULT
 from app.services.ingest import OpenedSource
 from app.services.pipeline import process_frame_iter
@@ -120,7 +121,9 @@ def test_live_yolo_without_plate_persists_no_alert(db, monkeypatch):
         }
 
     monkeypatch.setattr("app.services.pipeline.anpr_crops", fake_crops)
-    monkeypatch.setattr("app.services.pipeline.infer_vehicle", fake_infer)
+    queued = []
+    monkeypatch.setattr(settings, "cloud_verifier_queue_enabled", True)
+    monkeypatch.setattr("app.services.pipeline.cloud_verifier.enqueue", lambda job: queued.append(job) or True)
     frames = [(0, np.zeros((360, 640, 3), np.uint8), 0.0)]
     out = process_frame_iter(db, cam, iter(frames))
     assert out["ok"] is True
@@ -128,18 +131,22 @@ def test_live_yolo_without_plate_persists_no_alert(db, monkeypatch):
     assert len(rows) == 1
     assert rows[0].plate_norm == ""
     assert rows[0].vehicle_type == "car"
-    assert rows[0].vehicle_color == "white"
+    assert rows[0].vehicle_color == "black"
     blob = rows[0].vehicle_json or {}
-    assert blob["vehicle"]["unreadable_reason"] == "no_plate"
-    assert blob["vehicle"]["color"] == "white"
-    assert (blob.get("gemma") or {}).get("called") is True
+    assert blob["vehicle"]["unreadable_reason"] == "no_plate_localized"
+    assert blob["vehicle"]["color"] == "black"
+    assert (blob.get("gemma") or {}).get("called") is False
     assert (blob.get("gemma") or {}).get("plate_text") == ""
     assert db.scalar(select(func.count(Sighting.id))) == 1
     assert db.scalar(select(func.count(Alert.id))) == 0
-    assert calls["n"] == 1
+    assert calls["n"] == 0
+    assert queued == []
+    attempt = db.scalar(select(RecognitionAttempt))
+    assert attempt.evidence_path == ""
+    assert (attempt.quality_json or {}).get("context_evidence_path", "").endswith("_unread_context.jpg")
 
 
-def test_large_yolo_crop_calls_ollama(db, monkeypatch):
+def test_large_yolo_crop_without_plate_box_never_queues_ollama(db, monkeypatch):
     cam = add_camera(
         db,
         id="cam03",
@@ -179,14 +186,16 @@ def test_large_yolo_crop_calls_ollama(db, monkeypatch):
         }
 
     monkeypatch.setattr("app.services.pipeline.anpr_crops", fake_crops)
-    monkeypatch.setattr("app.services.pipeline.infer_vehicle", fake_infer)
+    queued = []
+    monkeypatch.setattr(settings, "cloud_verifier_queue_enabled", True)
+    monkeypatch.setattr("app.services.pipeline.cloud_verifier.enqueue", lambda job: queued.append(job) or True)
     frames = [(0, np.zeros((360, 640, 3), np.uint8), 0.0)]
     process_frame_iter(db, cam, iter(frames))
-    assert calls["n"] == 1
+    assert calls["n"] == 0
+    assert queued == []
     row = db.scalar(select(Sighting))
-    assert row.plate_norm == "GJ18BV7580"
-    assert row.vehicle_color == "white"
-    assert db.scalar(select(func.count(Alert.id))) == 1
+    assert row.plate_norm == ""
+    assert db.scalar(select(func.count(Alert.id))) == 0
 
 
 def test_detect_plate_boxes_finds_green_ev_plate():
@@ -209,10 +218,10 @@ def test_detect_plate_boxes_skips_bottom_hud():
     assert hits
 
 
-def test_enhance_upscales_small_crop():
+def test_enhance_upscales_small_crop_with_four_x_cap():
     from app.services.anpr import enhance_plate_crop
 
     tiny = np.zeros((20, 40, 3), dtype=np.uint8)
     tiny[:] = (40, 40, 200)
     out = enhance_plate_crop(tiny, min_width=320)
-    assert out.shape[1] >= 320
+    assert out.shape[1] == 160

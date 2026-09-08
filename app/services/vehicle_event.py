@@ -16,6 +16,7 @@ VEHICLE_TYPES = (
     "van",
     "two_wheeler",
     "auto_rickshaw",
+    "taxi_cab",
     "unknown",
 )
 
@@ -39,24 +40,13 @@ OVERLAY_TOKEN = re.compile(
 
 
 def is_recordable_plate(plate_norm: str | None) -> bool:
-    """Persist only plausible vehicle registrations, not HUD/clock OCR."""
+    """Return true only for a strict Indian registration syntax.
+
+    Partial and rejected OCR strings are retained in recognition_attempts, not
+    promoted to an identity-bearing sighting or an automatic alert.
+    """
     key = normalize(plate_norm)
-    if not key:
-        return False
-    if syntax_ok(key):
-        return True
-    hinted = layout_hint(key)
-    if hinted != key and syntax_ok(hinted):
-        return True
-    if OVERLAY_TOKEN.match(key):
-        return False
-    if key.isdigit() and len(key) <= 8:
-        return False
-    if key.isalpha() and len(key) <= 8:
-        return False
-    if len(key) < 7:
-        return False
-    return bool(re.search(r"[A-Z]", key) and re.search(r"\d", key))
+    return bool(key and not OVERLAY_TOKEN.match(key) and syntax_ok(key))
 
 
 def clean_attr(value: str | None, *, max_len: int = 40) -> str:
@@ -75,6 +65,8 @@ def clean_type(value: str | None) -> str:
         "jeep": "suv",
         "auto": "auto_rickshaw",
         "rickshaw": "auto_rickshaw",
+        "taxi": "taxi_cab",
+        "cab": "taxi_cab",
         "sedan": "car",
         "hatchback": "car",
     }
@@ -86,6 +78,7 @@ def parse_vehicle_payload(text: str) -> dict:
     plate, conf = "", 0.0
     raw = (text or "").strip()
     payload: dict = {}
+    parse_status = "empty" if not raw else "invalid_json"
     blob = raw
     if "```" in blob:
         blob = re.sub(r"```(?:json)?", "", blob).replace("```", "")
@@ -93,6 +86,7 @@ def parse_vehicle_payload(text: str) -> dict:
         loaded = json.loads(blob)
         if isinstance(loaded, dict):
             payload = loaded
+            parse_status = "json"
     except json.JSONDecodeError:
         match = re.search(r"\{[^{}]+\}", raw)
         if match:
@@ -100,6 +94,7 @@ def parse_vehicle_payload(text: str) -> dict:
                 loaded = json.loads(match.group(0))
                 if isinstance(loaded, dict):
                     payload = loaded
+                    parse_status = "recovered_json"
             except json.JSONDecodeError:
                 payload = {}
     plate = normalize(str(payload.get("plate_text") or payload.get("plate") or payload.get("vehicle_number") or ""))
@@ -115,6 +110,8 @@ def parse_vehicle_payload(text: str) -> dict:
         "vehicle_model": clean_attr(payload.get("model")),
         "vehicle_color": clean_attr(payload.get("color") or payload.get("colour")),
         "confidence": max(0.0, min(1.0, conf)),
+        "parse_status": parse_status,
+        "raw_response": raw[:1000],
     }
 
 
@@ -165,6 +162,14 @@ def build_vehicle_event(*, camera, sighting, extras: dict | None = None) -> dict
             "unreadable_reason": extra.get("unreadable_reason") or "",
         },
         "gemma": extra.get("gemma") or {},
+        "vision_only": extra.get("vision_only") or {},
+        "enhancement": extra.get("enhancement") or {},
+        "confirmation": extra.get("confirmation") or {
+            "status": "review",
+            "support_count": 0,
+            "supporting_sighting_ids": [],
+        },
+        "recognition": extra.get("recognition") or {},
         "confidence": {
             "plate": float(sighting.confidence or 0.0),
         },

@@ -136,7 +136,7 @@ def _crop(bgr: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> np.nda
     return crop
 
 
-def detect_vehicles(bgr: np.ndarray, *, predict_fn=None) -> list[VehicleDet]:
+def detect_vehicles(bgr: np.ndarray, *, predict_fn=None, max_detections: int | None = None) -> list[VehicleDet]:
     """Return vehicle crops only. Person boxes are dropped."""
     if bgr is None or getattr(bgr, "size", 0) == 0:
         return []
@@ -197,5 +197,5 @@ def detect_vehicles(bgr: np.ndarray, *, predict_fn=None) -> list[VehicleDet]:
             )
         )
     dets.sort(key=lambda d: (-(d.x2 - d.x1) * (d.y2 - d.y1), -d.confidence))
-    limit = max(1, int(settings.yolo_max_crops or 2))
+    limit = max(1, int(max_detections if max_detections is not None else settings.yolo_max_crops or 2))
     return dets[:limit]

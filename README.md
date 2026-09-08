@@ -22,7 +22,7 @@ A camera uses one processing mode:
 | Mode | Meaning |
 |---|---|
 | `vendor_metadata` | Consume authorised ANPR/event metadata from the camera or VMS |
-| `local_worker` | OpenCV capture + Ollama vision ANPR on this host |
+| `local_worker` | CPU FastALPR/FastPlateOCR, Tesseract uncertainty check, queued Ollama verification |
 | `remote_gpu` | Send **selected JPEG frames** to `REMOTE_INFERENCE_URL` |
 | `shared_regional` | Represented as a shared worker (same local path in P0) |
 | `central_on_demand` | Process only when an operator starts the worker |
@@ -77,7 +77,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 Leave that window open all day. Open http://127.0.0.1:8000
 
-**Hunt all 30 live feeds** (the government-catch path on this laptop): this host cannot decode 30 RTSP streams at once. Click **Hunt all 30 live feeds**. Four capture slots rotate (~12s each) so every live catalogue camera is visited each cycle. YOLO logs vehicles even when the plate is unreadable (night / distant PTZ). Ollama is called only when the vehicle box is wide enough. Coverage is `hunting 4 / visited N / 30`, not a fake 30/30 simultaneous decode.
+**Hunt all live feeds** rotates the configured capture slots; it does not claim every catalogue camera is decoded simultaneously. CPU FastALPR handles the immediate plate path. Uncertain high-quality crops enter one bounded background Ollama queue, so cloud latency does not consume a capture slot.
 
 - **Monitor** — plate + optional date → numbered map, dashed inferred camera-to-camera links, OSM **snap-to-road** possible path (OSRM Match by default, not a proven route), CSV/GeoJSON export.
 - **Investigate** — time range → which cameras had analytics running (not a full-video archive).
@@ -89,6 +89,9 @@ No Google Maps API. Default matching is the public OSRM Match server (no credit 
 
 ```powershell
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-cpu-anpr.txt
+python scripts\setup_cpu_anpr.py
+# After setup succeeds, set CPU_ANPR_MODELS_READY=true in .env
 python scripts\check_host.py
 python scripts\seed.py
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
@@ -109,11 +112,12 @@ python scripts\verify_own_feed.py
 python -m pytest -q
 ```
 
-## Live ANPR (YOLO detect → Ollama read)
+## Live ANPR (CPU plate detector to local OCR to optional cloud verifier)
 
-1. **YOLOv8n** detects vehicles only (`car`, `motorcycle`, `bus`, `truck`). **Person is ignored.**
-2. The vehicle crop is sent to **Ollama** (Cloud `gemma4:31b` or local GPU) for plate + type/colour.
-3. A vehicle JSON row is stored. An **Alert** is created only on exact watchlist match.
+1. FastALPR's plate-specific ONNX detector runs with `CPUExecutionProvider`; YOLOv8n remains a vehicle-region fallback and ignores people.
+2. FastPlateOCR reads the native plate crop. Uncertain results are checked by deterministic Tesseract variants; disagreement is review-only.
+3. A bounded one-worker queue sends only uncertain crops to Ollama. Vision-only frames are isolated from auto-confirmation because they have no tracked plate box.
+4. An alert requires the same strict plate on two distinct tracked frames before exact watchlist matching.
 
 ```powershell
 python -m pip install ultralytics
@@ -146,16 +150,16 @@ If `OLLAMA_API_KEY` is set and `OLLAMA_URL` is still localhost, the app uses `ht
 
 Records use `model_id=ollama:<actual-model>`. The prompt never includes the watchlist. The key is never returned by `/api/health`. This is not YOLO, Awiros, or PP-OCRv5.
 
-## Local OpenCV + Ollama provider
+## CPU ANPR and fail-safe confirmation
 
-- OpenCV captures and crops the live frame (HUD masked; vehicle region zoomed)
-- Ollama Cloud (or local GPU Ollama) reads plate + vehicle attributes
-- Indian plate normalisation + GJ / Bharat-series syntax flag
-- Independent multi-frame character-consistency vote
-- Exact normalised watchlist match
-- Evidence crop only
+- FastALPR `yolo-v9-t-384-license-plate-end2end` + FastPlateOCR `cct-s-v2-global-model`, pinned in `requirements-cpu-anpr.txt`
+- CPU execution only; model downloads happen in `scripts/setup_cpu_anpr.py`, not inside an unprepared live worker
+- Native-pixel quality gates, strict Indian/BH/Gujarat-government syntax, per-character confidence, IoU/centroid plate tracks, and two-frame confirmation
+- Tesseract checks uncertain crops; OpenCV enhancement is deterministic and non-generative
+- Raw outputs, quality, latency, reason, model hash, and evidence appear under `/api/recognition/diagnostics`
+- Layout substitutions and fuzzy candidates are review suggestions only, never automatic match keys
 
-Tesseract is not used. YOLO is the vehicle detector; Ollama is the plate reader.
+Run `python scripts\benchmark_anpr.py` to measure this host. Its output explicitly does not claim camera capacity.
 
 ## Optional remote GPU provider
 
@@ -179,7 +183,7 @@ Production never invents a remote plate. Tests mock the HTTP endpoint. On failur
 
 `POST /api/vendor/events` with `Authorization: Bearer <VENDOR_INGEST_TOKEN>`.
 
-Required: `event_id`, `camera_id`, `source_time`, `plate_raw`, `confidence`, `vendor_model_id`. Payload size is limited. The service persists a **Sighting** first, then exact-matches the watchlist, then opens an alert from that row. Replayed `event_id` values are rejected. The original payload is stored as a hash for audit.
+Required: `event_id`, `camera_id`, `source_time`, `plate_raw`, `confidence`, `vendor_model_id`. Payload size is limited. Events must provide a stable `passage_id` and distinct frame index or PTS to satisfy the same two-frame gate. The second confirmed persisted sighting may exact-match and open an alert. Replayed `event_id` values are rejected.
 
 ## Workers
 
@@ -298,7 +302,7 @@ The UI posts user-supplied assumptions (camera count, bitrate, target FPS, activ
 ## Known host limitations
 
 - Windows, Python 3.14, GTX 1650 — throughput is a measured hypothesis, not a statewide rating
-- ANPR is Ollama vision; Tesseract is not used
+- CPU detector throughput must be measured per camera; Tesseract uncertainty checks are much slower than FastPlateOCR
 - No Node.js and no external FFmpeg executable on PATH at plan time
 - OpenCV may still use its internal FFmpeg backend for RTSP
 - Government catalogue credentials and a real remote GPU endpoint are external blockers

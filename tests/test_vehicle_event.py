@@ -61,7 +61,7 @@ def test_empty_vehicle_json_loads(db):
 def test_recordable_plate_accepts_indian_syntax():
     assert is_recordable_plate("GJ01AB1234") is True
     assert is_recordable_plate("26BH4567AB") is True
-    assert is_recordable_plate("GJG1AB1234") is True
+    assert is_recordable_plate("GJG1AB1234") is False
 
 
 def test_recordable_plate_rejects_overlay():
@@ -83,6 +83,11 @@ def test_parse_vehicle_payload_and_prompt_has_no_watchlist():
     assert parsed["vehicle_make"] == "Maruti"
     assert parsed["vehicle_model"] == "Swift"
     assert parsed["vehicle_color"] == "white"
+    assert parsed["parse_status"] == "json"
+    invalid = parse_vehicle_payload("not valid json")
+    assert invalid["plate_norm"] == ""
+    assert invalid["parse_status"] == "invalid_json"
+    assert invalid["raw_response"] == "not valid json"
 
 
 def test_persist_stores_vehicle_json(db):
@@ -108,6 +113,15 @@ def test_persist_stores_vehicle_json(db):
         vehicle_make="Maruti",
         vehicle_model="Swift",
         vehicle_color="white",
+        enhancement={
+            "enabled": True,
+            "method": "opencv-clahe-unsharp-v1",
+            "profile": "plate",
+            "input_width": 120,
+            "output_width": 400,
+            "scale": 3.333,
+            "view_count": 1,
+        },
     )
     db.commit()
     payload = sighting.vehicle_json if isinstance(sighting.vehicle_json, dict) else json.loads(sighting.vehicle_json)
@@ -117,9 +131,11 @@ def test_persist_stores_vehicle_json(db):
     assert payload["vehicle"]["type"] == "car"
     assert payload["vehicle"]["make"] == "Maruti"
     assert payload["camera_id"] == cam.id
-    assert payload["watchlist_matched"] is True
-    assert created is True
+    assert payload["watchlist_matched"] is False
+    assert payload["confirmation"]["status"] == "pending"
+    assert payload["enhancement"]["method"] == "opencv-clahe-unsharp-v1"
+    assert created is False
     assert "VAHAN" in payload["disclaimer"]
     rebuilt = build_vehicle_event(camera=cam, sighting=sighting, extras={"vehicle_type": "car"})
     assert rebuilt["schema_version"] == 1
-    assert alert is not None
+    assert alert is None

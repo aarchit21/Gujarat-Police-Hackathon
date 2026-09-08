@@ -34,6 +34,7 @@
     </div>
     <aside>
       <div class="row">
+        <button id="btnHuntVision">Vision-only A/B (pinned 4)</button>
         <button id="btnHuntPin">Pin 4 working cameras</button>
         <button id="btnHuntStart">Hunt all 30 live feeds</button>
         <button class="secondary" id="btnHuntStop">Stop hunt</button>
@@ -41,15 +42,17 @@
         <button class="secondary" id="btnRefresh">Refresh</button>
         <button class="secondary" id="btnSync">Sync catalogue</button>
       </div>
-      <p class="legend">Hunt rotates 4 RTSP slots across every live catalogue camera. YOLO logs each vehicle even when the plate is unreadable. Ollama reads a plate only if the vehicle box is large enough. This is not 30 simultaneous decodes and not a central VMS. Map lines are inferred, not proven roads.</p>
+      <p class="legend">Vehicle detection and colour/type estimates are the primary live-feed output. Number-plate recognition is optional and can be switched on only for suitable cameras. This is not a central VMS.</p>
 
       <div class="tabs">
-        <button class="tab on" data-tab="monitor">Monitor</button>
-        <button class="tab" data-tab="investigate">Investigate</button>
-        <button class="tab" data-tab="alerts">Alerts</button>
+        <button class="tab on" data-tab="investigate">Investigation</button>
+        <button class="tab" data-tab="vehicles">Live vehicles</button>
+        <button class="tab" data-tab="monitor">Plate map</button>
+        <button class="tab" data-tab="alerts">Plate tools</button>
         <button class="tab" data-tab="watchlist">Watchlist</button>
         <button class="tab" data-tab="ledger">Ledger</button>
         <button class="tab" data-tab="workers">Workers</button>
+        <button class="tab" data-tab="diagnostics">ANPR diagnostics</button>
         <button class="tab" data-tab="cost">Cost</button>
         <button class="tab" data-tab="reports">Reports</button>
       </div>
@@ -68,27 +71,44 @@
         <div id="monitorTimeline"></div>
       </section>
 
-      <section data-panel="investigate" class="hidden">
-        <h2>Which cameras were analytics-active?</h2>
-        <p class="legend">Saves investigation time. This is analytics-on-this-host, not a full-video archive. Departmental recording stays local.</p>
-        <div class="row">
-          <input id="invStart" type="datetime-local" />
-          <input id="invEnd" type="datetime-local" />
-          <button id="btnInvestigate">Find cameras</button>
+      <section data-panel="investigate">
+        <h2>Vehicle investigation</h2>
+        <p class="legend">Search by vehicle type, colour, camera and time. Matches share selected attributes; identity is not confirmed.</p>
+        <div class="grid-form investigation-form">
+          <label>Vehicle type <select id="invType"><option value="">Any type</option></select></label>
+          <label>Vehicle colour <select id="invColor"><option value="">Any colour</option></select></label>
+          <label>Camera <select id="invCamera"><option value="">Any camera</option></select></label>
+          <label>Minimum detection confidence <input id="invConfidence" type="number" min="0" max="1" step="0.05" value="0" /></label>
+          <label>Start time <input id="invStart" type="datetime-local" /></label>
+          <label>End time <input id="invEnd" type="datetime-local" /></label>
         </div>
-        <div id="investigateOut" class="card muted">Pick a time range (or a single time in Start).</div>
+        <div class="row">
+          <button class="secondary" data-investigation-window="1">Last hour</button>
+          <button class="secondary" data-investigation-window="6">Last 6 hours</button>
+          <button class="secondary" data-investigation-window="24">Last 24 hours</button>
+          <button id="btnInvestigate">Search observations</button>
+          <a class="button secondary" id="dlInvestigationCsv" href="#">CSV</a>
+        </div>
+        <div id="investigateOut" class="card muted">Set a time range to find vehicle observations.</div>
+        <div id="investigationResults" class="evidence-grid"></div>
+      </section>
+
+      <section data-panel="vehicles" class="hidden">
+        <h2>Recent vehicle observations</h2>
+        <p class="legend">Type and colour are estimates from the visible vehicle body. Each card is one local camera track.</p>
+        <div id="liveVehicles" class="card muted">Waiting for vehicle records…</div>
       </section>
 
       <section data-panel="alerts" class="hidden">
+        <h2>Optional plate tools</h2>
+        <div id="plateRecognitionSettings" class="card muted">Loading ANPR setting…</div>
+        <div class="row"><button id="btnTogglePlateRecognition" class="secondary">Toggle number-plate recognition</button></div>
         <h2>Find designated plate</h2>
         <div class="row">
           <input id="plateQuery" value="GJ01AB1234" />
           <button class="secondary" id="btnSearch">Show history</button>
         </div>
         <div id="history"></div>
-        <h2>Live vehicles</h2>
-        <p class="legend">YOLO finds the vehicle. The bumper crop is sharpened and sent to Gemma 31b for the plate and colour. If characters are not in the pixels, the plate stays unreadable — we do not invent a number.</p>
-        <div id="liveVehicles" class="card muted">Waiting for vehicle records…</div>
         <h2>Recent OCR strings</h2>
         <div id="liveSightings" class="card muted">Waiting for sightings…</div>
         <h2>Alerts (exact watchlist match only)</h2>
@@ -159,6 +179,13 @@
         </div>
       </section>
 
+      <section data-panel="diagnostics" class="hidden">
+        <h2>ANPR recognition diagnostics</h2>
+        <p class="legend">CPU-only plate detection and OCR attempts. Empty reads carry a specific reason; processed evidence is labelled and never reconstructs characters.</p>
+        <div id="recognitionSummary" class="card muted">No recognition diagnostics yet.</div>
+        <div id="recognitionAttempts"></div>
+      </section>
+
       <section data-panel="cost" class="hidden">
         <h2>Capacity / cost estimator</h2>
         <p class="legend">Every result is an estimate, not a measured production result. No savings percentage is claimed.</p>
@@ -188,6 +215,6 @@
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/hls.js@1.5.17/dist/hls.min.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260905-anpr-localization-2"></script>
 </body>
 </html>

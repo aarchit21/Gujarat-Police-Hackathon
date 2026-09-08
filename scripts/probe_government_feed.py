@@ -18,6 +18,7 @@ from app.models import Alert, Camera, Sighting  # noqa: E402
 from app.security import redact_url  # noqa: E402
 from app.services.catalogue import sync_catalogue  # noqa: E402
 from app.services.coverage import camera_origin, coverage  # noqa: E402
+from app.services.ingest import rtsp_url_for  # noqa: E402
 from app.services.network_check import host_network_report, probe_one_rtsp  # noqa: E402
 from app.services.pipeline import analyze_camera  # noqa: E402
 from app.services.reports import as_json, sighting_rows  # noqa: E402
@@ -42,12 +43,12 @@ def main() -> int:
             return 3
         print("selected_camera", selected.id, "codec", selected.codec, "live", selected.catalogue_live)
         print("selected_rtsp", redact_url(selected.source_uri or selected.protected_rtsp_url_or_reference))
-        probe = probe_one_rtsp(selected.source_uri or selected.protected_rtsp_url_or_reference)
+        # Exercise the same authenticated RTSP URL construction as the live worker.
+        # The stored catalogue URL intentionally has no credentials on it.
+        probe = probe_one_rtsp(rtsp_url_for(selected))
         print("rtsp_probe", json.dumps(probe, indent=2))
         if not probe.get("frame"):
-            print("BLOCKER: selected RTSP did not yield a frame")
-            print("coverage", coverage(db))
-            return 4
+            print("RTSP direct probe failed; trying the live worker source path (including HLS fallback)")
         before_s = {s.id for s in db.scalars(select(Sighting))}
         before_a = {a.id for a in db.scalars(select(Alert))}
         result = analyze_camera(db, selected.id, max_frames=12, max_seconds=15)
@@ -62,9 +63,13 @@ def main() -> int:
         cov = coverage(db)
         print("coverage", json.dumps({k: cov[k] for k in ("onboarded_count", "own_feed_count", "government_catalogue_count", "connected_count", "analytics_active_count", "government_feed_status")}, default=str))
         print("report_rows", len(json.loads(as_json(sighting_rows(db)))))
-        if not probe.get("frame"):
+        if not result.get("ok") or not result.get("frames_seen"):
+            print("BLOCKER: selected live camera did not yield a processable frame")
             return 4
-        print("OK: catalogue reachable; selected stream decoded a frame. Watchlist hit only if a genuine plate matched.")
+        print(
+            "OK: catalogue reachable; selected live stream decoded and entered the ANPR pipeline. "
+            "A plate is only persisted/alerted when genuine two-frame evidence qualifies."
+        )
         return 0
     finally:
         db.close()

@@ -86,6 +86,10 @@ async function loadCoverage() {
     ["Queued", h.queued_count],
     ["Gov feed", govFeedText(h)],
     ["Ollama vision", ollamaVisionText(h)],
+    ["Enhancement", (h.vision_enhancement && h.vision_enhancement.enabled) ? h.vision_enhancement.method : "off"],
+    ["CPU ANPR", (h.cpu_anpr && h.cpu_anpr.models_ready) ? "FastALPR ready" : ((h.cpu_anpr && h.cpu_anpr.tesseract_available) ? "Tesseract fallback" : "not ready")],
+    ["Plate recognition", (h.plate_recognition && h.plate_recognition.enabled) ? "ON" : "OFF"],
+    ["ANPR attempts", (h.recognition && h.recognition.attempt_count) || 0],
     ["YOLO", (h.yolo_detector && h.yolo_detector.label) || "—"],
     ["Measured fps", h.measured_safe_fps || (h.capacity && h.capacity.measured_safe_fps) || "—"],
     ["Recommended fps", h.recommended_target_fps || (h.capacity && h.capacity.recommended_target_fps) || "—"],
@@ -165,6 +169,9 @@ function showCamera(c) {
       <div class="muted">${c.department} · ${c.city || ""} · last frame ${c.last_frame_at || "—"}</div>
       <div class="muted">origin ${c.origin || "—"} · codec ${c.codec || "unspecified"} · size ${resolutionText(c)} · pts ${c.last_pts_ms ?? "—"} · reconnects ${c.reconnect_count}</div>
       <div class="muted">last error: ${c.last_error || "none"}</div>
+      <div class="row"><label class="muted">Plate recognition for this camera
+        <select data-plate-mode><option value="inherit" ${c.plate_recognition_mode === "inherit" ? "selected" : ""}>inherit global setting</option><option value="on" ${c.plate_recognition_mode === "on" ? "selected" : ""}>on when global is on</option><option value="off" ${c.plate_recognition_mode === "off" ? "selected" : ""}>off for this camera</option></select>
+      </label></div>
       <div class="muted">${c.coords_are_placeholder ? "Map position is a placeholder — catalogue omitted lat/lng." : ""}</div>
       <div class="muted">${c.hls_preview_blocked ? "HLS stays server-side. Use Live frame." : ""}</div>
       <div class="row" style="margin-top:6px">
@@ -178,6 +185,11 @@ function showCamera(c) {
   document.getElementById("cameraDetail").querySelectorAll("[data-prev]").forEach((btn) => {
     btn.onclick = () => openPreview(c, btn.dataset.prev);
   });
+  document.getElementById("cameraDetail").querySelector("[data-plate-mode]").onchange = async (event) => {
+    await j(`/api/cameras/${encodeURIComponent(c.id)}`, { method: "PATCH", body: JSON.stringify({ plate_recognition_mode: event.target.value }) });
+    await loadPlateRecognitionSettings();
+    await refresh();
+  };
   document.getElementById("cameraDetail").querySelector("[data-start]").onclick = async () => {
     await j(`/api/workers/${c.id}/start`, { method: "POST" });
     refresh();
@@ -378,12 +390,27 @@ function vehicleRowCard(row, extraHtml) {
   const unread = veh.unreadable_reason || "";
   const gemma = row.gemma || {};
   const gemmaText = gemma.plate_text
-    ? `Gemma: ${gemma.plate_text}`
+    ? `YOLO+Gemma: ${gemma.plate_text}`
     : gemma.skipped
-      ? `Gemma: ${gemma.skipped}`
+      ? `YOLO+Gemma: ${gemma.skipped}`
       : gemma.called
-        ? "Gemma: empty"
+        ? "YOLO+Gemma: empty"
         : "";
+  const vo = row.vision_only || {};
+  const enhancement = row.enhancement || {};
+  const confirmation = row.confirmation || {};
+  const recognition = row.recognition || {};
+  const enhancementText = enhancement.enabled
+    ? `${enhancement.method || "OpenCV"} Â· ${enhancement.profile || "vision"} Â· ${enhancement.view_count || 1} view(s)`
+    : enhancement.method === "none" ? "off" : "";
+  const voModels = vo.models || {};
+  const voLines = Object.keys(voModels)
+    .map((k) => {
+      const m = voModels[k] || {};
+      const t = m.plate_text || (m.skipped ? m.skipped : "empty");
+      return `Vision-only ${m.model || k}: ${t}`;
+    })
+    .join(" · ");
   const number = veh.number || row.plate_norm || row.plate || (unread ? `unreadable (${unread})` : "—");
   const type = veh.type || row.vehicle_type || "unknown";
   const color = veh.color || row.vehicle_color || "—";
@@ -398,7 +425,11 @@ function vehicleRowCard(row, extraHtml) {
       <div><span class="k">Date / time (IST)</span>${when}</div>
       <div><span class="k">Camera</span>${cam}</div>
       <div><span class="k">Location</span>${loc}</div>
-      ${gemmaText ? `<div><span class="k">Gemma</span>${gemmaText}</div>` : ""}
+      ${gemmaText ? `<div><span class="k">YOLO+Gemma</span>${gemmaText}</div>` : ""}
+      ${voLines ? `<div><span class="k">Vision-only</span>${voLines}</div>` : ""}
+      ${enhancementText ? `<div><span class="k">Image enhancement</span>${enhancementText}</div>` : ""}
+      <div><span class="k">Plate decision</span>${confirmation.status || "review"} · ${confirmation.support_count || 0}/${confirmation.required_frames || 2} frames</div>
+      ${recognition.reader_agreement ? `<div><span class="k">Reader agreement</span>${recognition.reader_agreement}</div>` : ""}
     </div>
     ${extraHtml || ""}
   </div>`;
@@ -407,17 +438,94 @@ function vehicleRowCard(row, extraHtml) {
 async function loadLiveVehicles() {
   const el = document.getElementById("liveVehicles");
   if (!el) return;
-  const data = await j("/api/vehicle-events?limit=20&valid_only=false&include_unreadable=true");
-  const rows = Array.isArray(data) ? data : data.records || [];
+  const end = new Date();
+  const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
+  const data = await j(`/api/investigations/vehicles?${new URLSearchParams({ start: start.toISOString(), end: end.toISOString(), limit: "20", sort: "desc" })}`);
+  const rows = data.observations || [];
   if (!rows.length) {
     el.className = "card muted";
-    const reason = (data && data.empty_reason) || "No valid vehicle records yet.";
-    const ollama = (data && data.ollama && data.ollama.label) || "";
-    el.textContent = reason + (ollama ? ` ${ollama}` : "");
+    el.textContent = "No vehicle observations in the last 24 hours.";
     return;
   }
   el.className = "";
-  el.innerHTML = rows.slice().reverse().map((r) => vehicleRowCard(r)).join("");
+  el.innerHTML = rows.map(vehicleObservationCard).join("");
+}
+
+function vehicleObservationCard(row) {
+  const image = row.evidence_path ? `<img src="${evidenceUrl(row.evidence_path)}" alt="vehicle evidence" />` : "";
+  return `<article class="card observation-card">${image}
+    <div class="vehicle-grid">
+      <div><span class="k">Vehicle type</span><b>${row.vehicle_type || "unknown"}</b> <span class="muted">${Number(row.type_confidence || 0).toFixed(2)}</span></div>
+      <div><span class="k">Colour</span><b>${row.vehicle_color || "unknown"}</b> <span class="muted">${Number(row.color_confidence || 0).toFixed(2)}</span></div>
+      <div><span class="k">Camera</span>${row.camera_id} ${row.city ? `· ${row.city}` : ""}</div>
+      <div><span class="k">Observed</span>${row.first_seen_at_ist || formatWhen(row.first_seen_at)}</div>
+    </div></article>`;
+}
+
+function datetimeLocalValue(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function setInvestigationWindow(hours) {
+  const end = new Date();
+  const start = new Date(end.getTime() - hours * 60 * 60 * 1000);
+  document.getElementById("invStart").value = datetimeLocalValue(start);
+  document.getElementById("invEnd").value = datetimeLocalValue(end);
+}
+
+async function loadInvestigationOptions() {
+  const data = await j("/api/vehicle-observation-options");
+  const type = document.getElementById("invType");
+  const color = document.getElementById("invColor");
+  const camera = document.getElementById("invCamera");
+  if (!type || !color || !camera) return;
+  type.innerHTML = '<option value="">Any type</option>' + (data.vehicle_types || []).map((v) => `<option value="${v}">${v.replaceAll("_", " ")}</option>`).join("");
+  color.innerHTML = '<option value="">Any colour</option>' + (data.vehicle_colors || []).map((v) => `<option value="${v}">${v}</option>`).join("");
+  camera.innerHTML = '<option value="">Any camera</option>' + (data.cameras || []).map((c) => `<option value="${c.id}">${c.id} · ${c.name || c.city || ""}</option>`).join("");
+}
+
+async function searchVehicleObservations() {
+  const start = document.getElementById("invStart").value;
+  const end = document.getElementById("invEnd").value;
+  if (!start || !end) return;
+  const q = new URLSearchParams({ start: new Date(start).toISOString(), end: new Date(end).toISOString(), limit: "100", sort: "asc" });
+  const type = document.getElementById("invType").value;
+  const color = document.getElementById("invColor").value;
+  const camera = document.getElementById("invCamera").value;
+  const conf = document.getElementById("invConfidence").value;
+  if (type) q.set("vehicle_type", type);
+  if (color) q.set("vehicle_color", color);
+  if (camera) q.set("camera_id", camera);
+  if (conf) q.set("min_confidence", conf);
+  const data = await j(`/api/investigations/vehicles?${q}`);
+  const out = document.getElementById("investigateOut");
+  const results = document.getElementById("investigationResults");
+  out.className = "card";
+  out.innerHTML = `<b>${data.total || 0} matching observation(s)</b> · ${(Object.keys(data.camera_counts || {}).length)} camera(s)<br><span class="muted">${data.disclaimer}</span>`;
+  results.innerHTML = (data.observations || []).map(vehicleObservationCard).join("") || '<div class="card muted">No matching observations in this time range.</div>';
+  markers.clearLayers(); links.clearLayers(); routes.clearLayers();
+  const points = [];
+  (data.observations || []).forEach((row) => {
+    if (row.lat == null || row.lng == null) return;
+    points.push([row.lat, row.lng]);
+    L.circleMarker([row.lat, row.lng], { radius: 7, color: "#2c5282", fillOpacity: 0.85 })
+      .bindPopup(`${row.vehicle_type} · ${row.vehicle_color}<br>${row.camera_id}<br>${row.first_seen_at_ist || row.first_seen_at}`)
+      .addTo(markers);
+  });
+  if (points.length) map.fitBounds(points, { padding: [36, 36] });
+  document.getElementById("dlInvestigationCsv").href = `/api/investigations/vehicles/export.csv?${q}&token=${encodeURIComponent(TOKEN)}`;
+}
+
+async function loadPlateRecognitionSettings() {
+  const el = document.getElementById("plateRecognitionSettings");
+  if (!el) return;
+  const data = await j("/api/settings/recognition");
+  el.className = "card";
+  el.innerHTML = `<b>Number-plate recognition: ${data.enabled ? "ON" : "OFF"}</b><br><span class="muted">${data.effective_camera_count || 0} camera(s) currently effective. When off, vehicle type and colour detection continues and no new plate alerts are created.</span>`;
+  const button = document.getElementById("btnTogglePlateRecognition");
+  if (button) button.textContent = data.enabled ? "Turn number-plate recognition off" : "Turn number-plate recognition on";
+  return data;
 }
 
 async function loadLiveSightings() {
@@ -438,6 +546,26 @@ async function loadLiveSightings() {
         `<div class="card"><b>${s.plate_raw || s.plate_norm}</b> · ${s.camera_id} · ${s.syntax_ok ? "syntax ok" : "not a valid plate"}<div class="muted">${s.source_time_ist || formatWhen(s.source_time)} · ${s.model_id || ""} · conf ${(s.confidence || 0).toFixed(2)}</div></div>`
     )
     .join("");
+}
+
+async function loadRecognitionDiagnostics() {
+  const summaryEl = document.getElementById("recognitionSummary");
+  const rowsEl = document.getElementById("recognitionAttempts");
+  if (!summaryEl || !rowsEl) return;
+  const data = await j("/api/recognition/diagnostics?limit=30");
+  const summary = data.summary || {};
+  const reasons = summary.reason_counts || {};
+  summaryEl.className = "card";
+  summaryEl.textContent = `${summary.attempt_count || 0} attempts · reasons ${Object.entries(reasons).map(([k, v]) => `${k}:${v}`).join(", ") || "none"}`;
+  rowsEl.innerHTML = (data.attempts || []).map((a) => {
+    const isLocalizedPlate = a.detector === "fast_alpr" && a.reason_code !== "no_plate_localized";
+    const crop = [
+      isLocalizedPlate && a.evidence_path ? `<figure><figcaption>Native plate crop</figcaption><img src="${evidenceUrl(a.evidence_path)}" alt="native plate crop" /></figure>` : "",
+      a.context_evidence_path ? `<figure><figcaption>${isLocalizedPlate ? "Detector context" : "Vehicle context — no plate localized"}</figcaption><img src="${evidenceUrl(a.context_evidence_path)}" alt="boxed detector context" /></figure>` : "",
+    ].join("");
+    const confs = (a.character_confidences || []).map((v) => Number(v).toFixed(2)).join(" ");
+    return `<div class="card">${crop}<b>${a.plate_norm || "empty"}</b> · ${a.reason_code} · ${a.camera_id}<div class="muted">track ${a.track_id || "—"} · ${a.detector || "—"} / ${a.recognizer || "—"} · conf ${Number(a.confidence || 0).toFixed(2)} · ${Number(a.latency_ms || 0).toFixed(1)} ms<br>native ${(a.native_size || []).join("×") || "—"} · chars ${confs || "—"} · ${a.accepted ? "accepted candidate" : "review/rejected"}</div></div>`;
+  }).join("") || '<div class="card muted">No candidate attempts have been persisted.</div>';
 }
 
 async function loadAlerts() {
@@ -566,6 +694,7 @@ async function refresh() {
   await loadAlerts();
   await loadWorkers();
   await loadWatchlist();
+  await loadRecognitionDiagnostics();
 }
 
 document.querySelectorAll(".tab").forEach((tab) => {
@@ -701,6 +830,11 @@ async function pinHunt() {
   alert(out.disclaimer || `Pinned ${(out.started || []).length} working cameras. Queued ${(out.queued || []).length}.`);
   refresh();
 }
+async function visionOnlyHunt() {
+  const out = await j("/api/hunt/vision-only", { method: "POST" });
+  alert(out.disclaimer || `Pinned ${(out.started || []).length}.`);
+  refresh();
+}
 async function stopHunt() {
   await j("/api/hunt/stop", { method: "POST" });
   refresh();
@@ -709,6 +843,8 @@ document.getElementById("btnHuntStart").onclick = startHunt;
 document.getElementById("btnHuntStop").onclick = stopHunt;
 const huntPin = document.getElementById("btnHuntPin");
 if (huntPin) huntPin.onclick = pinHunt;
+const huntVision = document.getElementById("btnHuntVision");
+if (huntVision) huntVision.onclick = visionOnlyHunt;
 const huntStart2 = document.getElementById("btnHuntStart2");
 const huntStop2 = document.getElementById("btnHuntStop2");
 if (huntStart2) huntStart2.onclick = startHunt;
@@ -755,6 +891,22 @@ document.getElementById("btnCost").onclick = async () => {
   });
   document.getElementById("costOut").textContent = JSON.stringify(out, null, 2);
 };
+// Vehicle-first investigation replaces the older analytics-active-only search.
+document.getElementById("btnInvestigate").onclick = searchVehicleObservations;
+document.querySelectorAll("[data-investigation-window]").forEach((button) => {
+  button.onclick = () => {
+    setInvestigationWindow(Number(button.dataset.investigationWindow || 24));
+    searchVehicleObservations();
+  };
+});
+document.getElementById("btnTogglePlateRecognition").onclick = async () => {
+  const current = await loadPlateRecognitionSettings();
+  const out = await j("/api/settings/recognition", { method: "PATCH", body: JSON.stringify({ enabled: !current.enabled }) });
+  await loadPlateRecognitionSettings();
+  await loadCoverage();
+  alert(`Number-plate recognition is now ${out.enabled ? "ON" : "OFF"}.`);
+};
+
 document.getElementById("dlJson").onclick = (e) => {
   e.preventDefault();
   window.open("/api/reports/sightings.json?token=" + encodeURIComponent(TOKEN), "_blank");
@@ -764,10 +916,14 @@ document.getElementById("dlCsv").onclick = (e) => {
   window.open("/api/reports/sightings.csv?token=" + encodeURIComponent(TOKEN), "_blank");
 };
 
+setInvestigationWindow(24);
+loadInvestigationOptions().then(searchVehicleObservations).catch(() => {});
+loadPlateRecognitionSettings().catch(() => {});
 refresh();
 setInterval(() => {
   loadCoverage();
   loadWorkers();
   loadLiveVehicles();
   loadLiveSightings();
+  loadRecognitionDiagnostics();
 }, 4000);

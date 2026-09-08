@@ -79,8 +79,14 @@ pre.card { white-space: pre-wrap; font-size: 12px; }
 .preview video, .preview img { width: 100%; max-height: 180px; background: #000; object-fit: contain; }
 .preview img.hidden, .preview video.hidden { display: none; }
 .preview .muted { color: #ccc; }
+.investigation-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.evidence-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
+.observation-card { margin: 0; }
+.observation-card img { width: 100%; max-height: 150px; object-fit: contain; background: #111; margin-bottom: 8px; }
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; height: auto; }
   #map { height: 360px; }
   .vehicle-grid { grid-template-columns: 1fr; }
+  .investigation-form { grid-template-columns: 1fr; }
+  .evidence-grid { grid-template-columns: 1fr; }
 }
