@@ -75,14 +75,22 @@ def test_vision_only_sends_enhanced_context_and_zoom_views(monkeypatch):
     client = httpx.Client(transport=httpx.MockTransport(handler))
     result = infer_named_vision(views, model="llava:7b", client=client)
 
-    assert len(captured["images"]) == meta["view_count"] == 3
+    images = captured.get("images")
+    if not images:
+        messages = captured.get("messages") or []
+        images = (messages[0] or {}).get("images") if messages else []
+    assert len(images) == meta["view_count"] == 3
     decoded = [
         cv2.imdecode(np.frombuffer(base64.b64decode(blob), np.uint8), cv2.IMREAD_COLOR)
-        for blob in captured["images"]
+        for blob in images
     ]
     assert all(image is not None for image in decoded)
     assert decoded[1].shape[1] == 1280
-    assert "same frame" in captured["prompt"]
+    prompt = captured.get("prompt") or ""
+    if not prompt:
+        messages = captured.get("messages") or []
+        prompt = str((messages[0] or {}).get("content") or "") if messages else ""
+    assert "same frame" in prompt
     assert result["enhancement"]["view_count"] == 3
 
 

@@ -42,11 +42,13 @@ class VehicleDet:
 def _weights_path() -> Path:
     raw = (settings.yolo_weights or "yolov8n.pt").strip()
     path = Path(raw)
-    if not path.is_absolute():
-        local = ROOT / "data" / "models" / path.name
-        if local.is_file():
-            return local
-    return path
+    if path.is_absolute():
+        return path
+    name = path.name
+    for candidate in (ROOT / "data" / "models" / name, ROOT / name, path):
+        if candidate.is_file():
+            return candidate
+    return ROOT / "data" / "models" / name
 
 
 def _pick_device() -> str:

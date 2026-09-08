@@ -9,12 +9,17 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
-FONT = Path(r"C:\Windows\Fonts\consola.ttf")
-FALLBACK = Path(r"C:\Windows\Fonts\arial.ttf")
+FONTS = (
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+    Path("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"),
+    Path("/usr/share/fonts/truetype/freefont/FreeMono.ttf"),
+    Path(r"C:\Windows\Fonts\consola.ttf"),
+    Path(r"C:\Windows\Fonts\arial.ttf"),
+)
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for path in (FONT, FALLBACK):
+    for path in FONTS:
         if path.is_file():
             return ImageFont.truetype(str(path), size)
     return ImageFont.load_default()

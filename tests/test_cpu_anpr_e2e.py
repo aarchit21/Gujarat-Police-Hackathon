@@ -15,7 +15,7 @@ def test_real_cpu_anpr_own_feed_persists_two_frames_before_alert(db):
     status = cpu_anpr_status()
     if not status.get("fast_alpr_available") or not status.get("models_ready"):
         pytest.skip("optional CPU ANPR models are not prepared on this host")
-    frame_path = ROOT / "data" / "frames" / "cam-ahmedabad" / "0000.jpg"
+    frame_path = ROOT / "data" / "frames" / "cam-ahmedabad" / "0010.jpg"
     frame = load_bgr(Path(frame_path))
     if frame is None:
         pytest.skip("own-feed frame is unavailable")

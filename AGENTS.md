@@ -24,7 +24,12 @@ If authorised government feeds cannot be decoded on this host, the mandatory gov
 
 ## Host
 
-Windows, Python 3.14, GTX 1650, Tesseract at `C:\Program Files\Tesseract-OCR\tesseract.exe`. Do not require FFmpeg or Node for the P0.
+Two hosts are valid:
+
+- Original laptop: Windows, Python 3.14, GTX 1650, Tesseract at `C:\Program Files\Tesseract-OCR\tesseract.exe`.
+- This GPU server: Linux, conda env `gujhac`, Python 3.11, RTX A4500 (20 GB). Tesseract from conda-forge. Local Ollama `qwen3-vl:8b` on `http://127.0.0.1:11434`.
+
+Do not require an FFmpeg or Node **executable** for the P0. OpenCV may still use its bundled FFmpeg backend.
 
 ## Layout
 

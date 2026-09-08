@@ -87,13 +87,22 @@ If no real alert by midday, strip fuzzy / ByteTrack / relay / bonus.
 
 ---
 
-## Host facts (this machine)
+## Host facts
 
-- Windows, Python 3.14, GTX 1650
-- Tesseract OCR installed (`C:\Program Files\Tesseract-OCR\tesseract.exe`)
+**Windows laptop (original P0 host)**
+
+- Python 3.14, GTX 1650
+- Tesseract OCR at `C:\Program Files\Tesseract-OCR\tesseract.exe`
 - No FFmpeg and no Node on PATH at plan time — do not depend on them for Day 1
-- OpenCV + pytesseract is the first ANPR path; Awiros/PaddleOCR is a **candidate** swap, not a lock
-- 2 FPS is a hypothesis. Calibrate.
+
+**Linux GPU server (current run host)**
+
+- conda env `gujhac`, Python 3.11, NVIDIA RTX A4500 (20 GB)
+- Tesseract from conda-forge on the env `PATH`
+- Local Ollama 0.18 on `http://127.0.0.1:11434`, vision model `qwen3-vl:8b`
+- OpenCV is built with an internal FFmpeg backend; a system `ffmpeg` binary is still not required
+
+OpenCV + pytesseract is the first ANPR path; Awiros/PaddleOCR is a **candidate** swap, not a lock. 2 FPS is a hypothesis. Calibrate.
 
 ---
 

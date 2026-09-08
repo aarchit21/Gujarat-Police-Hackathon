@@ -1,6 +1,7 @@
 """Download YOLOv8n weights into data/models. One-time, ~6MB."""
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -16,6 +17,16 @@ def main() -> None:
     name = Path(settings.yolo_weights or "yolov8n.pt").name
     target = dest / name
     print("weights", target)
+    for source in (ROOT / name, Path.cwd() / name):
+        if source.is_file() and source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+            print("copied", source, "->", target)
+            print("ok")
+            return
+    if target.is_file():
+        print("already present")
+        print("ok")
+        return
     try:
         from ultralytics import YOLO
     except Exception as exc:

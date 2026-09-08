@@ -26,6 +26,11 @@ from app.services.plates import normalize
 from app.services.vehicle_event import VEHICLE_PROMPT, parse_vehicle_payload
 
 VISION_CANDIDATES = (
+    "qwen3-vl:8b",
+    "qwen3-vl:4b",
+    "qwen3-vl",
+    "qwen2.5vl:7b",
+    "qwen2.5vl:3b",
     "llava:7b",
     "llava:7b-v1.6",
     "llava:latest",
@@ -35,8 +40,6 @@ VISION_CANDIDATES = (
     "qwen3.5:4b",
     "gemma3:4b",
     "gemma3:12b",
-    "qwen3-vl",
-    "qwen3-vl:4b",
     "moondream:1.8b",
 )
 # gemma3:4b was retired from Ollama Cloud on 2026-07-15 (HTTP 410).
@@ -109,11 +112,9 @@ def is_local_url(url: str | None = None) -> bool:
 
 
 def effective_ollama_url() -> str:
-    """Use Ollama Cloud when an API key is set and the URL is still the local default."""
+    """Cloud only when OLLAMA_URL is ollama.com. A local URL is never rewritten."""
     base = normalize_ollama_base()
     if is_cloud_url(base):
-        return "https://ollama.com"
-    if (settings.ollama_api_key or "").strip() and is_local_url(base):
         return "https://ollama.com"
     return base
 
@@ -242,12 +243,29 @@ def _image_list(image_b64: str | list[str]) -> list[str]:
 
 
 def _local_generate(http: httpx.Client, base: str, model: str, image_b64: str | list[str], prompt: str) -> dict:
+    """Prefer /api/chat for Qwen3-VL and Gemma 3; fall back to /api/generate for older LLaVA."""
+    images = _image_list(image_b64)
+    chat = http.post(
+        base + "/api/chat",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt, "images": images}],
+            "stream": False,
+            "format": "json",
+        },
+        headers=auth_headers(),
+    )
+    if chat.status_code not in {404, 405}:
+        chat.raise_for_status()
+        payload = chat.json()
+        if _response_text(payload):
+            return payload
     response = http.post(
         base + "/api/generate",
         json={
             "model": model,
             "prompt": prompt,
-            "images": _image_list(image_b64),
+            "images": images,
             "stream": False,
             "format": "json",
         },
@@ -399,13 +417,13 @@ def infer_bgr(
 
 
 def vision_only_model_list() -> list[str]:
-    raw = (getattr(settings, "vision_only_models", None) or "gemma4:31b,glm-5.3-flash")
+    raw = (getattr(settings, "vision_only_models", None) or "qwen3-vl:8b")
     out: list[str] = []
     for part in str(raw).split(","):
         name = part.strip()
         if name and name not in out:
             out.append(name)
-    return out or ["gemma4:31b", "glm-5.3-flash"]
+    return out or ["qwen3-vl:8b"]
 
 
 def infer_named_vision(
@@ -487,7 +505,7 @@ def infer_named_vision(
 
 
 def infer_vision_only_frame(bgr: np.ndarray, *, camera_id: str = "") -> dict:
-    """Full-frame vision A/B. No YOLO. Gemma first, then GLM 5.3 Flash if no recordable plate."""
+    """Full-frame vision over VISION_ONLY_MODELS. No YOLO. First recordable plate wins."""
     from app.services.vehicle_event import is_recordable_plate
 
     if bgr is None or getattr(bgr, "size", 0) == 0:

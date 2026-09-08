@@ -13,6 +13,7 @@ from tests.conftest import add_camera, add_watchlist
 
 
 def test_vision_only_gemma_then_glm_when_gemma_empty(monkeypatch):
+    monkeypatch.setattr(settings, "vision_only_models", "gemma4:31b,glm-5.3-flash")
     calls = []
 
     def fake_named(_bgr, *, model, max_width=1280, client=None):
@@ -36,6 +37,8 @@ def test_vision_only_gemma_then_glm_when_gemma_empty(monkeypatch):
 
 
 def test_vision_only_glm_404_does_not_disable_gemma(monkeypatch):
+    monkeypatch.setattr(settings, "vision_only_models", "gemma4:31b,glm-5.3-flash")
+
     def fake_named(_bgr, *, model, max_width=1280, client=None):
         if "glm" in model:
             return {"plate_norm": "", "skipped": "unavailable", "model_id": f"ollama:{model}"}

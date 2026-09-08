@@ -70,7 +70,7 @@ The health endpoint and UI show the active database type. SQLite is labelled as 
 Stop any `--reload` server (reload kills workers). Then:
 
 ```powershell
-# .env must include CCTV_ACCESS_TOKEN, OLLAMA_API_KEY (cloud). Snap-to-road uses public OSRM (no Google key).
+# .env: CCTV_ACCESS_TOKEN. Local Ollama needs OLLAMA_URL=http://127.0.0.1:11434 and an empty OLLAMA_API_KEY.
 $env:DEMO_AUTOSTART_WORKERS = "true"
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
@@ -85,15 +85,49 @@ Leave that window open all day. Open http://127.0.0.1:8000
 
 No Google Maps API. Default matching is the public OSRM Match server (no credit card). Optional Mapbox / Geoapify tokens stay in `.env` and are never sent to the browser.
 
+## Run (Linux GPU server, conda env `gujhac`)
+
+Python 3.11, RTX A4500 (20 GB). Tesseract is installed into the env (no sudo):
+
+```bash
+conda activate gujhac
+conda install -c conda-forge "tesseract>=5" -y
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-cpu-anpr.txt
+python -m pip uninstall -y opencv-python   # keep opencv-python-headless only
+python -m pip install --force-reinstall opencv-python-headless
+python scripts/setup_cpu_anpr.py
+# After setup succeeds, set CPU_ANPR_MODELS_READY=true in .env
+python scripts/pull_yolo.py
+ollama pull qwen3-vl:8b
+python scripts/check_host.py
+python scripts/seed.py
+# This GPU box already binds 8000–8003 for other services; 8010 is free.
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8010
+```
+
+Open http://\<server\>:8010 (or SSH-tunnel to 127.0.0.1:8010). Do not use `--reload` for the all-day demo.
+
+`.env` for this host:
+
+```
+OLLAMA_URL=http://127.0.0.1:11434
+OLLAMA_API_KEY=
+OLLAMA_VISION_MODEL=qwen3-vl:8b
+OLLAMA_VISION_ENABLED=true
+```
+
+A leftover Cloud API key with a localhost URL no longer redirects to ollama.com. Cloud is used only when `OLLAMA_URL` is `https://ollama.com`.
+
 ## Run (Windows)
 
 ```powershell
 python -m pip install -r requirements.txt
 python -m pip install -r requirements-cpu-anpr.txt
-python scripts\setup_cpu_anpr.py
+python scripts/setup_cpu_anpr.py
 # After setup succeeds, set CPU_ANPR_MODELS_READY=true in .env
-python scripts\check_host.py
-python scripts\seed.py
+python scripts/check_host.py
+python scripts/seed.py
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -108,7 +142,7 @@ Default operator token: `p0-operator` (override with `ADMIN_TOKEN`). Vendor inge
 Own-feed verification:
 
 ```powershell
-python scripts\verify_own_feed.py
+python scripts/verify_own_feed.py
 python -m pytest -q
 ```
 
@@ -121,16 +155,16 @@ python -m pytest -q
 
 ```powershell
 python -m pip install ultralytics
-python scripts\pull_yolo.py
+python scripts/pull_yolo.py
 ```
 
-First run downloads `yolov8n.pt` (~6 MB) into `data/models/` (gitignored). If ultralytics/torch is missing, the worker falls back to the OpenCV blob crop. YOLO and Cloud Ollama do not need to share this laptop's 1650: detection can use CUDA or CPU (`YOLO_DEVICE=auto`).
+First run copies or downloads `yolov8n.pt` (~6 MB) into `data/models/` (gitignored). If ultralytics/torch is missing, the worker falls back to the OpenCV blob crop. Detection can use CUDA or CPU (`YOLO_DEVICE=auto`). On the 20 GB A4500, YOLOv8n plus `qwen3-vl:8b` should sit around 8–10 GB.
 
-**Local Ollama** (no API key):
+**Local Ollama** (no API key). On a 20 GB GPU use `qwen3-vl:8b` (~6 GB download, ~8 GB VRAM):
 
 ```powershell
 $env:OLLAMA_URL = "http://127.0.0.1:11434"
-$env:OLLAMA_VISION_MODEL = "llava:7b"
+$env:OLLAMA_VISION_MODEL = "qwen3-vl:8b"
 $env:OLLAMA_VISION_ENABLED = "true"
 ```
 
@@ -146,7 +180,7 @@ $env:OLLAMA_VISION_MODEL = "gemma4:31b"
 $env:OLLAMA_VISION_ENABLED = "true"
 ```
 
-If `OLLAMA_API_KEY` is set and `OLLAMA_URL` is still localhost, the app uses `https://ollama.com` automatically. Cloud requests send `Authorization: Bearer <key>`. Local requests send no key. Retired Cloud models (`gemma3:*`, `llava:*`) map to `gemma4:31b` (the Cloud vision model this account lists). Cloud vision uses `/api/chat`.
+Cloud is used only when `OLLAMA_URL` is `https://ollama.com`. An explicit local URL is never rewritten, even if a leftover `OLLAMA_API_KEY` is present. Cloud requests send `Authorization: Bearer <key>`. Local requests send no key. Retired Cloud models (`gemma3:*`, `llava:*`) map to `gemma4:31b`. Cloud vision uses `/api/chat`.
 
 Records use `model_id=ollama:<actual-model>`. The prompt never includes the watchlist. The key is never returned by `/api/health`. This is not YOLO, Awiros, or PP-OCRv5.
 
@@ -159,7 +193,7 @@ Records use `model_id=ollama:<actual-model>`. The prompt never includes the watc
 - Raw outputs, quality, latency, reason, model hash, and evidence appear under `/api/recognition/diagnostics`
 - Layout substitutions and fuzzy candidates are review suggestions only, never automatic match keys
 
-Run `python scripts\benchmark_anpr.py` to measure this host. Its output explicitly does not claim camera capacity.
+Run `python scripts/benchmark_anpr.py` to measure this host. Its output explicitly does not claim camera capacity.
 
 ## Optional remote GPU provider
 
@@ -289,8 +323,8 @@ PTS regression or a large PTS jump ends the current passage, resets the characte
 Government-feed status is whatever this host actually observes after `POST /api/catalogue/sync` and a bounded RTSP probe. Do not claim 50 live government cameras. Do not treat catalogue `live=true` as `analytics_active`. Protected HLS credentials stay server-side; browser HLS preview is blocked unless a safe URL is available. WHEP may be used for on-demand preview. Analytics uses RTSP-over-TCP.
 
 ```powershell
-python scripts\check_host.py
-python scripts\probe_government_feed.py
+python scripts/check_host.py
+python scripts/probe_government_feed.py
 ```
 
 `probe_government_feed.py` syncs the catalogue, tests TCP/HTTPS, opens **one** RTSP camera, and runs a bounded ANPR sample. It does not open every catalogue stream.
@@ -301,7 +335,7 @@ The UI posts user-supplied assumptions (camera count, bitrate, target FPS, activ
 
 ## Known host limitations
 
-- Windows, Python 3.14, GTX 1650 — throughput is a measured hypothesis, not a statewide rating
+- Windows laptop (Python 3.14, GTX 1650) or Linux GPU server (conda `gujhac`, Python 3.11, RTX A4500 20 GB) — throughput is a measured hypothesis, not a statewide rating
 - CPU detector throughput must be measured per camera; Tesseract uncertainty checks are much slower than FastPlateOCR
 - No Node.js and no external FFmpeg executable on PATH at plan time
 - OpenCV may still use its internal FFmpeg backend for RTSP

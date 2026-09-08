@@ -15,15 +15,28 @@ from app.config import settings
 
 
 def main() -> int:
+    import time
+
     from fast_alpr import ALPR
 
-    alpr = ALPR(
-        detector_model=settings.cpu_anpr_detector_model,
-        ocr_model=settings.cpu_anpr_ocr_model,
-        detector_providers=["CPUExecutionProvider"],
-        ocr_device="cpu",
-        ocr_providers=["CPUExecutionProvider"],
-    )
+    last_error: Exception | None = None
+    alpr = None
+    for attempt in range(1, 4):
+        try:
+            alpr = ALPR(
+                detector_model=settings.cpu_anpr_detector_model,
+                ocr_model=settings.cpu_anpr_ocr_model,
+                detector_providers=["CPUExecutionProvider"],
+                ocr_device="cpu",
+                ocr_providers=["CPUExecutionProvider"],
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            print(f"setup attempt {attempt}/3 failed: {exc}")
+            time.sleep(2 * attempt)
+    if alpr is None:
+        raise SystemExit(f"CPU ANPR model download failed: {last_error}")
     # A tiny call forces model resolution/cache creation without needing a feed.
     alpr.predict(np.zeros((64, 128, 3), dtype=np.uint8))
     model_paths = [

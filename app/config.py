@@ -80,7 +80,7 @@ class Settings(BaseSettings):
 
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_api_key: str = ""
-    ollama_vision_model: str = "llava:7b"
+    ollama_vision_model: str = "qwen3-vl:8b"
     ollama_vision_enabled: bool = True
     ollama_vision_on_own_feed: bool = True
     ollama_vision_timeout_seconds: float = 90.0
@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     vision_enhancement_enabled: bool = True
     vision_only_enabled: bool = False
     vision_only_interval_seconds: float = 8.0
-    vision_only_models: str = "gemma4:31b,glm-5.3-flash"  # qwen2.5vl is not on Ollama Cloud
+    vision_only_models: str = "qwen3-vl:8b"
 
     yolo_enabled: bool = True
     yolo_weights: str = "yolov8n.pt"
@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     yolo_max_crops: int = 2
     vehicle_max_detections: int = 8
     vehicle_attribute_refinement_enabled: bool = True
-    vehicle_attribute_model: str = "gemma4:31b"
+    vehicle_attribute_model: str = "qwen3-vl:8b"
     vehicle_attribute_queue_size: int = 16
     vehicle_attribute_max_age_seconds: float = 20.0
     vehicle_attribute_min_confidence: float = 0.65

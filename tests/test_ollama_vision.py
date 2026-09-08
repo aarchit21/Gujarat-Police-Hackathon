@@ -7,6 +7,7 @@ import pytest
 from app.services.ollama_vision import (
     PLATE_PROMPT,
     OllamaVisionError,
+    effective_ollama_url,
     infer_bgr,
     parse_vision_text,
     resolve_vision_model,
@@ -33,6 +34,19 @@ def test_resolve_prefers_installed_candidate(monkeypatch):
     assert resolve_vision_model(["llama3:8b", "llava:7b"]) == "llava:7b"
 
 
+def test_local_url_is_not_rewritten_when_api_key_is_set(monkeypatch):
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "http://127.0.0.1:11434")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "unit-leftover-cloud-key")
+    assert effective_ollama_url() == "http://127.0.0.1:11434"
+
+
+def test_resolve_prefers_qwen3_vl_8b_when_installed(monkeypatch):
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "http://127.0.0.1:11434")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_model", "qwen3-vl:8b")
+    assert resolve_vision_model(["llama3:8b", "qwen3-vl:8b"]) == "qwen3-vl:8b"
+
+
 def test_should_use_vision_when_enabled(db, monkeypatch):
     monkeypatch.setattr("app.services.ollama_vision._cloud_disabled_reason", "")
     monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_enabled", True)
@@ -51,10 +65,13 @@ def test_infer_bgr_success_with_mock(monkeypatch):
     monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_model", "llava:7b")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/generate"
+        assert request.url.path == "/api/chat"
         body = request.read()
         assert b"GJ01AB1234" not in body
-        return httpx.Response(200, json={"response": '{"plate_text":"GJ05CD8888","confidence":0.7}', "model": "llava:7b"})
+        return httpx.Response(
+            200,
+            json={"message": {"content": '{"plate_text":"GJ05CD8888","confidence":0.7}'}, "model": "llava:7b"},
+        )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     frame = np.zeros((80, 160, 3), dtype=np.uint8)
