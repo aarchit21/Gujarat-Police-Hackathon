@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # live crop can be OCRed or sent to the optional cloud verifier.
     cpu_anpr_min_detector_confidence: float = 0.35
     cpu_anpr_workers: int = 1
+    # auto: CUDA ONNX if the runtime has it, else CPU. Laptop P0 stays CPU.
+    cpu_anpr_device: str = "auto"
+    cpu_anpr_ocr_min_width: int = 400
     plate_track_iou_threshold: float = 0.25
     plate_track_max_gap_seconds: float = 1.5
     plate_track_best_crops: int = 5
@@ -91,6 +94,10 @@ class Settings(BaseSettings):
     cloud_verifier_queue_size: int = 8
     cloud_verifier_max_age_seconds: float = 12.0
     vision_enhancement_enabled: bool = True
+    # LPDGAN is generative and off until trained LPBlur weights are on disk.
+    lpdgan_enabled: bool = False
+    lpdgan_weights: str = "data/models/lpdgan_generator.pth"
+    lpdgan_device: str = "auto"
     vision_only_enabled: bool = False
     vision_only_interval_seconds: float = 8.0
     vision_only_models: str = "qwen3-vl:8b"
@@ -106,7 +113,7 @@ class Settings(BaseSettings):
     vehicle_attribute_queue_size: int = 16
     vehicle_attribute_max_age_seconds: float = 20.0
     vehicle_attribute_min_confidence: float = 0.65
-    # Hunt: 4 capture slots rotate across all live catalogue cameras.
+    # Hunt capture slots = max_open_captures; they rotate across the catalogue.
     hunt_dwell_seconds: float = 28.0
     hunt_max_frames: int = 40
     rtsp_open_wait_seconds: float = 6.0

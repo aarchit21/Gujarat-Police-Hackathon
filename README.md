@@ -90,7 +90,7 @@ No Google Maps API. Default matching is the public OSRM Match server (no credit 
 Python 3.11, RTX A4500 (20 GB). Tesseract is installed into the env (no sudo):
 
 ```bash
-conda activate gujhac
+create and activate a virtual environment
 conda install -c conda-forge "tesseract>=5" -y
 python -m pip install -r requirements.txt
 python -m pip install -r requirements-cpu-anpr.txt

@@ -564,7 +564,8 @@ async function loadRecognitionDiagnostics() {
       a.context_evidence_path ? `<figure><figcaption>${isLocalizedPlate ? "Detector context" : "Vehicle context — no plate localized"}</figcaption><img src="${evidenceUrl(a.context_evidence_path)}" alt="boxed detector context" /></figure>` : "",
     ].join("");
     const confs = (a.character_confidences || []).map((v) => Number(v).toFixed(2)).join(" ");
-    return `<div class="card">${crop}<b>${a.plate_norm || "empty"}</b> · ${a.reason_code} · ${a.camera_id}<div class="muted">track ${a.track_id || "—"} · ${a.detector || "—"} / ${a.recognizer || "—"} · conf ${Number(a.confidence || 0).toFixed(2)} · ${Number(a.latency_ms || 0).toFixed(1)} ms<br>native ${(a.native_size || []).join("×") || "—"} · chars ${confs || "—"} · ${a.accepted ? "accepted candidate" : "review/rejected"}</div></div>`;
+    const verdict = a.accepted ? "accepted candidate" : (a.syntax_ok ? "review (syntax ok)" : "review/rejected");
+    return `<div class="card">${crop}<b>${a.plate_norm || "empty"}</b> · ${a.reason_code} · ${a.camera_id}<div class="muted">track ${a.track_id || "—"} · ${a.detector || "—"} / ${a.recognizer || "—"} · conf ${Number(a.confidence || 0).toFixed(2)} · ${Number(a.latency_ms || 0).toFixed(1)} ms<br>native ${(a.native_size || []).join("×") || "—"} · chars ${confs || "—"} · ${verdict}</div></div>`;
   }).join("") || '<div class="card muted">No candidate attempts have been persisted.</div>';
 }
 

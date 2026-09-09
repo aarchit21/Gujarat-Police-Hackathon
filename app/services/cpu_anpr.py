@@ -27,6 +27,8 @@ _inference_slots = threading.BoundedSemaphore(max(1, int(settings.cpu_anpr_worke
 _alpr = None
 _load_error = ""
 _loaded_model_hash = ""
+_loaded_providers: list[str] = []
+_loaded_ocr_device = ""
 
 
 @dataclass
@@ -191,6 +193,38 @@ def _model_hash() -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
+def onnx_execution_providers() -> list[str]:
+    """Prefer CUDA when the installed ORT build actually lists it."""
+    try:
+        import onnxruntime
+
+        available = list(onnxruntime.get_available_providers())
+    except Exception:
+        return ["CPUExecutionProvider"]
+    requested = str(getattr(settings, "cpu_anpr_device", "auto") or "auto").strip().lower()
+    if requested == "cpu":
+        return ["CPUExecutionProvider"] if "CPUExecutionProvider" in available else available
+    preferred: list[str] = []
+    if requested in {"auto", "cuda"}:
+        for name in ("CUDAExecutionProvider",):
+            if name in available:
+                preferred.append(name)
+    if requested == "cuda" and not preferred:
+        return ["CPUExecutionProvider"] if "CPUExecutionProvider" in available else available
+    if "CPUExecutionProvider" in available:
+        preferred.append("CPUExecutionProvider")
+    return preferred or available
+
+
+def _ocr_device_name(providers: list[str]) -> str:
+    requested = str(getattr(settings, "cpu_anpr_device", "auto") or "auto").strip().lower()
+    if requested == "cpu":
+        return "cpu"
+    if "CUDAExecutionProvider" in providers or "TensorrtExecutionProvider" in providers:
+        return "cuda"
+    return "cpu"
+
+
 def cpu_anpr_status() -> dict:
     try:
         import onnxruntime
@@ -212,13 +246,15 @@ def cpu_anpr_status() -> dict:
     tesseract_available = bool(
         (configured_tesseract and configured_tesseract.is_file()) or shutil.which("tesseract")
     )
+    chosen = _loaded_providers or onnx_execution_providers()
     return {
         "enabled": bool(settings.cpu_anpr_enabled),
         "models_ready": bool(settings.cpu_anpr_models_ready),
         "fast_alpr_available": fast_available,
         "onnx_available": onnx_available,
         "onnx_providers": providers,
-        "execution_provider": "CPUExecutionProvider",
+        "execution_provider": chosen[0] if chosen else "CPUExecutionProvider",
+        "ocr_device": _loaded_ocr_device or _ocr_device_name(chosen),
         "inference_workers": max(1, int(settings.cpu_anpr_workers)),
         "tesseract_available": tesseract_available,
         "loaded": _alpr is not None,
@@ -230,7 +266,7 @@ def cpu_anpr_status() -> dict:
 
 
 def _load_alpr():
-    global _alpr, _load_error, _loaded_model_hash
+    global _alpr, _load_error, _loaded_model_hash, _loaded_providers, _loaded_ocr_device
     if _alpr is not None:
         return _alpr
     if not settings.cpu_anpr_enabled or not settings.cpu_anpr_models_ready:
@@ -240,15 +276,30 @@ def _load_alpr():
             return _alpr
         try:
             from fast_alpr import ALPR
+            providers = onnx_execution_providers()
+            ocr_device = _ocr_device_name(providers)
             kwargs = {
                 "detector_model": settings.cpu_anpr_detector_model,
                 "ocr_model": settings.cpu_anpr_ocr_model,
-                "detector_providers": ["CPUExecutionProvider"],
-                "ocr_device": "cpu",
-                "ocr_providers": ["CPUExecutionProvider"],
+                "detector_providers": providers,
+                "ocr_device": ocr_device,
+                "ocr_providers": providers,
             }
             accepted = inspect.signature(ALPR).parameters
-            _alpr = ALPR(**{k: v for k, v in kwargs.items() if k in accepted})
+            try:
+                _alpr = ALPR(**{k: v for k, v in kwargs.items() if k in accepted})
+            except Exception:
+                if providers[:1] != ["CPUExecutionProvider"]:
+                    kwargs["detector_providers"] = ["CPUExecutionProvider"]
+                    kwargs["ocr_providers"] = ["CPUExecutionProvider"]
+                    kwargs["ocr_device"] = "cpu"
+                    providers = ["CPUExecutionProvider"]
+                    ocr_device = "cpu"
+                    _alpr = ALPR(**{k: v for k, v in kwargs.items() if k in accepted})
+                else:
+                    raise
+            _loaded_providers = list(providers)
+            _loaded_ocr_device = ocr_device
             paths = [
                 Path(_alpr.detector.detector.model._model_path),
                 Path(_alpr.ocr.ocr_model.model._model_path),
@@ -292,6 +343,46 @@ def _parse_box(result: Any) -> tuple[int, int, int, int] | None:
         return None
 
 
+def _ocr_text_conf(ocr: Any) -> tuple[str, list[float], float]:
+    if ocr is None:
+        return "", [], 0.0
+    raw = str(_value(ocr, "text", "plate_text", default="") or "")
+    raw_confidence = _value(ocr, "character_confidences", "char_confidences", "confidence", default=0.0)
+    confs: list[float] = []
+    if isinstance(raw_confidence, (list, tuple, np.ndarray)):
+        confs = [max(0.0, min(1.0, float(v))) for v in raw_confidence]
+        conf = statistics.mean(confs) if confs else 0.0
+    else:
+        conf = float(raw_confidence or 0.0)
+    return raw, confs, conf
+
+
+def _prefer_enhanced_ocr(native_raw: str, native_conf: float, enhanced_raw: str, enhanced_conf: float) -> bool:
+    native_ok, enhanced_ok = syntax_ok(normalize(native_raw)), syntax_ok(normalize(enhanced_raw))
+    if enhanced_ok and not native_ok:
+        return True
+    if enhanced_ok and native_ok and enhanced_conf >= native_conf:
+        return True
+    if not native_ok and not enhanced_ok and len(normalize(enhanced_raw)) > len(normalize(native_raw)):
+        return True
+    return False
+
+
+def _ocr_enhanced_crop(runner: Any, crop: np.ndarray) -> tuple[str, list[float], float] | None:
+    ocr = getattr(runner, "ocr", None)
+    if ocr is None or not hasattr(ocr, "predict") or crop is None or not getattr(crop, "size", 0):
+        return None
+    target = max(48, int(getattr(settings, "cpu_anpr_ocr_min_width", 400) or 400))
+    enhanced, _meta = enhance_for_vision(crop, profile="plate", min_width=target)
+    if enhanced is None or not getattr(enhanced, "size", 0):
+        return None
+    try:
+        result = ocr.predict(enhanced)
+    except Exception:
+        return None
+    return _ocr_text_conf(result)
+
+
 def detect_with_fast_alpr(bgr: np.ndarray, *, predictor=None) -> list[CpuPlateCandidate]:
     started = time.perf_counter()
     runner = predictor or _load_alpr()
@@ -316,14 +407,17 @@ def detect_with_fast_alpr(bgr: np.ndarray, *, predictor=None) -> list[CpuPlateCa
         if crop.size == 0:
             continue
         ocr = _value(result, "ocr", default=result)
-        raw = str(_value(ocr, "text", "plate_text", default="") or "")
+        raw, confs, conf = _ocr_text_conf(ocr)
+        recognizer = "fast_plate_ocr"
+        native_raw = raw
+        if (not syntax_ok(normalize(raw))) or w < int(getattr(settings, "cpu_anpr_ocr_min_width", 400) or 400):
+            enhanced = _ocr_enhanced_crop(runner, crop)
+            if enhanced is not None:
+                e_raw, e_confs, e_conf = enhanced
+                if _prefer_enhanced_ocr(raw, conf, e_raw, e_conf):
+                    raw, confs, conf = e_raw, e_confs, e_conf
+                    recognizer = "fast_plate_ocr_enhanced"
         norm = normalize(raw)
-        confs = _value(ocr, "character_confidences", "char_confidences", default=[]) or []
-        raw_confidence = _value(ocr, "confidence", default=0.0)
-        if isinstance(raw_confidence, (list, tuple, np.ndarray)) and not confs:
-            confs = list(raw_confidence)
-        confs = [max(0.0, min(1.0, float(v))) for v in confs]
-        conf = statistics.mean(confs) if confs else float(raw_confidence or 0.0)
         quality = asdict(plate_quality(crop))
         raw_detector_confidence = _value(det, "confidence", "score", default=None)
         # Predictors in unit tests and older FastALPR adapters may omit a score.
@@ -333,12 +427,14 @@ def detect_with_fast_alpr(bgr: np.ndarray, *, predictor=None) -> list[CpuPlateCa
         quality.update({
             "aspect_ratio": round(float(w) / max(float(h), 1.0), 3),
             "detector_confidence": round(detector_confidence, 4),
+            "ocr_native": native_raw,
+            "ocr_enhanced": raw if recognizer.endswith("enhanced") else "",
         })
-        reason = "candidate" if norm else quality.get("reason") or "ocr_empty"
+        reason = "candidate" if syntax_ok(norm) else (quality.get("reason") or ("syntax_invalid" if norm else "ocr_empty"))
         out.append(CpuPlateCandidate(
             plate_raw=raw, plate_norm=norm, confidence=max(0.0, min(1.0, conf)),
             character_confidences=confs, crop_bgr=crop, box=(x, y, w, h),
-            detector="fast_alpr", recognizer="fast_plate_ocr",
+            detector="fast_alpr", recognizer=recognizer,
             model_id=f"{settings.cpu_anpr_detector_model}+{settings.cpu_anpr_ocr_model}",
             model_hash=_model_hash(), quality=quality, reason=reason,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3), raw_output=raw,
@@ -470,7 +566,16 @@ def cpu_plate_candidates(
                     candidate.raw_output = f"primary={candidate.plate_raw};secondary={secondary.plate_raw}"
                     candidate.latency_ms += secondary.latency_ms
                     if candidate.reader_agreement == "disagree":
-                        candidate.reason = "reader_disagreement"
+                        if syntax_ok(secondary.plate_norm) and not syntax_ok(candidate.plate_norm):
+                            candidate.plate_raw = secondary.plate_raw
+                            candidate.plate_norm = secondary.plate_norm
+                            candidate.confidence = secondary.confidence
+                            candidate.character_confidences = secondary.character_confidences
+                            candidate.recognizer = secondary.recognizer
+                            candidate.reason = "candidate"
+                            candidate.reader_agreement = "secondary_syntax"
+                        else:
+                            candidate.reason = "reader_disagreement"
             return sorted(fast, key=lambda c: (confidence_gate(c), c.quality.get("score", 0), c.confidence), reverse=True)
         if not allow_opencv_fallback:
             return []

@@ -60,6 +60,7 @@ def test_empty_vehicle_json_loads(db):
 
 def test_recordable_plate_accepts_indian_syntax():
     assert is_recordable_plate("GJ01AB1234") is True
+    assert is_recordable_plate("GJ08AV5178") is True
     assert is_recordable_plate("26BH4567AB") is True
     assert is_recordable_plate("GJG1AB1234") is False
 

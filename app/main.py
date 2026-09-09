@@ -19,6 +19,7 @@ from app.models import Alert, AuditEvent, Camera, RecognitionAttempt, Sighting, 
 from app.security import evidence_relpath_is_safe, redact_url
 from app.services.activity import cameras_active_at
 from app.services.anpr import enhancement_status
+from app.services.lpdgan import lpdgan_status
 from app.services.cpu_anpr import cpu_anpr_status
 from app.services.cloud_verifier_queue import cloud_verifier
 from app.services.recognition_diagnostics import diagnostics_snapshot, serialize_attempt
@@ -176,6 +177,7 @@ def health(db: Session = Depends(get_db)):
         "remote_inference_configured": bool(settings.remote_inference_url),
         "ollama_vision": vision_status(),
         "vision_enhancement": enhancement_status(),
+        "lpdgan": lpdgan_status(),
         "vision_only": {
             "active": bool(getattr(manager, "vision_only", False)),
             "models": [m.strip() for m in (settings.vision_only_models or "").split(",") if m.strip()],

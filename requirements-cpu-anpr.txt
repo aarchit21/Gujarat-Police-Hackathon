@@ -1,4 +1,6 @@
-# Optional CPU-only ANPR stack. Install explicitly; the base app still runs without it.
+# Optional ANPR stack. Install explicitly; the base app still runs without it.
 fast-alpr==0.4.0
 fast-plate-ocr==1.1.0
+# Laptop / CPU hosts.
+# GPU server: pip install -r requirements-gpu-anpr.txt (replaces this with CUDA EP).
 onnxruntime==1.29.0

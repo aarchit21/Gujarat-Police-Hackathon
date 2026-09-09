@@ -1,7 +1,7 @@
 import numpy as np
 
 from app.config import settings
-from app.services.cloud_verifier_queue import CloudJob, CloudVerifierQueue, _failure_reason
+from app.services.cloud_verifier_queue import CloudJob, CloudVerifierQueue, _failure_reason, classify_cloud_read
 
 
 class _NoopThread:
@@ -36,6 +36,19 @@ def test_cloud_queue_is_bounded_and_keeps_best_candidates(monkeypatch):
     assert queue.status()["depth"] == 2
     assert queue.status()["dropped"] == 1
     assert [job.priority for job in queue._jobs] == [0.9, 0.5]
+
+
+def test_cloud_read_does_not_call_valid_gujarat_plate_syntax_invalid():
+    reason, accepted, persist = classify_cloud_read("GJ08AV5178", 0.60)
+    assert reason == "low_confidence"
+    assert accepted is False
+    assert persist is True
+    reason, accepted, persist = classify_cloud_read("GJ08AV5178", 0.90)
+    assert reason == "candidate" and accepted is True and persist is True
+    reason, accepted, persist = classify_cloud_read("GSDBAWS178", 0.60)
+    assert reason == "syntax_invalid" and persist is False
+    reason, accepted, persist = classify_cloud_read("", 0.60)
+    assert reason == "ocr_empty" and persist is False
 
 
 def test_cloud_failure_reasons_are_specific():

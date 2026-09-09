@@ -42,11 +42,14 @@ def layout_hint(plate_norm: str) -> str:
 
 
 def vote(reads: list[str]) -> str:
-    """Character-wise majority across normalised reads of one passage."""
+    """Independent consensus: whole-string majority, else per-character majority."""
     normed = [normalize(r) for r in reads]
     normed = [n for n in normed if n]
     if not normed:
         return ""
+    whole, count = Counter(normed).most_common(1)[0]
+    if count >= 2:
+        return whole
     width = max(len(s) for s in normed)
     chars: list[str] = []
     for i in range(width):

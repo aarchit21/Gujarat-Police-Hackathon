@@ -47,6 +47,32 @@ def test_alert_only_after_sighting_persistence(db):
     assert second.vehicle_json["confirmation"]["support_count"] == 2
 
 
+def test_track_vote_prefers_majority_syntax_valid_plate(db):
+    cam = add_camera(db)
+    persist_sighting(
+        db, cam, plate_raw="GJ08AV5178", plate_norm="GJ08AV5178", plate_voted="GJ08AV5178",
+        syntax=True, confidence=0.6, model_id="ollama-vision-p0", model_hash="x",
+        evidence_path="", run_id="run1", frame_index=0, passage_id="cam12-t2",
+        source_pts_ms=100.0, provider="ollama_vision",
+    )
+    second, _alert, created = persist_sighting(
+        db, cam, plate_raw="GJ08AV5171", plate_norm="GJ08AV5171", plate_voted="GJ08AV5171",
+        syntax=True, confidence=0.6, model_id="ollama-vision-p0", model_hash="x",
+        evidence_path="", run_id="run1", frame_index=1, passage_id="cam12-t2",
+        source_pts_ms=200.0, provider="ollama_vision",
+    )
+    assert created is False
+    third, _alert, created = persist_sighting(
+        db, cam, plate_raw="GJ08AV5178", plate_norm="GJ08AV5178", plate_voted="GJ08AV5178",
+        syntax=True, confidence=0.6, model_id="ollama-vision-p0", model_hash="x",
+        evidence_path="", run_id="run1", frame_index=2, passage_id="cam12-t2",
+        source_pts_ms=300.0, provider="ollama_vision",
+    )
+    assert created is False
+    assert third.plate_norm == "GJ08AV5178"
+    assert third.plate_voted == "GJ08AV5178"
+
+
 def test_alert_deduplication(db):
     cam = add_camera(db)
     add_watchlist(db)

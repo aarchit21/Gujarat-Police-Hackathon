@@ -52,7 +52,11 @@ def test_health_exposes_sqlite_fallback_and_coverage():
         assert health["government_catalogue_count"] == 0
         assert health["vision_enhancement"]["method"] == "opencv-clahe-unsharp-v1"
         assert health["vision_enhancement"]["generative"] is False
-        assert health["cpu_anpr"]["execution_provider"] == "CPUExecutionProvider"
+        assert health["cpu_anpr"]["execution_provider"] in {
+            "CPUExecutionProvider",
+            "CUDAExecutionProvider",
+            "TensorrtExecutionProvider",
+        }
         assert health["recognition"]["attempt_count"] == 0
         diag = client.get("/api/recognition/diagnostics", headers={"Authorization": "Bearer p0-operator"})
         assert diag.status_code == 200

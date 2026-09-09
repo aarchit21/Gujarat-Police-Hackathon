@@ -205,12 +205,15 @@ def bumper_crop(bgr: np.ndarray, box: tuple[int, int, int, int] | None) -> np.nd
 
 def enhancement_status() -> dict:
     """Public, non-secret description of the deterministic vision preprocessor."""
+    from app.services.lpdgan import lpdgan_status
+
     return {
         "enabled": bool(settings.vision_enhancement_enabled),
         "method": ENHANCEMENT_METHOD,
         "profiles": ["plate", "vehicle", "frame"],
         "max_scale": 4.0,
         "generative": False,
+        "lpdgan": lpdgan_status(),
     }
 
 
@@ -249,8 +252,32 @@ def enhance_for_vision(
         "view_count": 1,
     }
     out = bgr.copy()
+    meta["generative"] = False
     if not enabled or w < 2 or h < 2:
         return out, meta
+
+    if profile == "plate" and bool(getattr(settings, "lpdgan_enabled", False)):
+        from app.services.lpdgan import deblur_plate_bgr
+
+        deblurred, lpd_meta = deblur_plate_bgr(out)
+        meta["lpdgan"] = {
+            "applied": bool(lpd_meta.get("applied")),
+            "ready": bool(lpd_meta.get("ready")),
+            "reason": lpd_meta.get("reason") or "",
+            "device": lpd_meta.get("device") or "",
+        }
+        if lpd_meta.get("applied"):
+            oh, ow = deblurred.shape[:2]
+            meta.update(
+                {
+                    "method": "lpdgan",
+                    "generative": True,
+                    "output_width": int(ow),
+                    "output_height": int(oh),
+                    "scale": round(float(ow) / float(w), 3) if w else 1.0,
+                }
+            )
+            return deblurred, meta
 
     try:
         target = max(0, int(min_width or 0))

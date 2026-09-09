@@ -194,16 +194,12 @@ def _process_job(job: CloudJob) -> None:
         parse_status = str(payload.get("parse_status") or "") if job.detector not in {"fast_alpr", "opencv_plate"} else "json"
         skipped = str(payload.get("skipped") or "") if job.detector not in {"fast_alpr", "opencv_plate"} else ""
     latency = (time.perf_counter() - started) * 1000.0
-    accepted = is_recordable_plate(norm) and confidence >= settings.plate_confirmation_median_confidence
     skip_reason = {
         "error": "cloud_error", "cloud_disabled": "authentication_failed",
         "disabled": "model_unavailable", "unavailable": "model_unavailable",
     }.get(skipped, skipped)
-    reason = (
-        "candidate" if accepted else
-        skip_reason if skip_reason in {"busy", "throttled", "timeout", "model_unavailable", "authentication_failed", "cloud_error"} else
-        "invalid_json" if parse_status == "invalid_json" else
-        "syntax_invalid" if norm else "ocr_empty"
+    reason, accepted, persist = classify_cloud_read(
+        norm, confidence, skipped=skip_reason, parse_status=parse_status,
     )
     if job.kind == "vision_only":
         evidence_original = ""
@@ -227,7 +223,7 @@ def _process_job(job: CloudJob) -> None:
             latency_ms=latency, accepted=accepted, evidence_path=evidence_processed or evidence,
             enhanced_shape=evidence_crop.shape[:2],
         )
-        if accepted:
+        if persist:
             persist_sighting(
                 db, camera, plate_raw=raw, plate_norm=norm, plate_voted=norm,
                 syntax=True, confidence=confidence, model_id=model_id, model_hash="cloud",
@@ -236,7 +232,8 @@ def _process_job(job: CloudJob) -> None:
                 provider=recognizer, ingest_time=datetime.now(timezone.utc), box=job.box,
                 frame_shape=job.frame_shape, vehicle_type=job.vehicle_type,
                 vehicle_color=job.vehicle_color, vision_only=vision_only,
-                enhancement=enhancement, recognition={
+                enhancement=enhancement, unreadable_reason="" if accepted else reason,
+                recognition={
                     "detector": job.detector, "recognizer": recognizer,
                     "quality": job.quality, "reason": reason, "latency_ms": latency,
                     "evidence_original": evidence_original,
@@ -250,6 +247,49 @@ def _process_job(job: CloudJob) -> None:
         raise
     finally:
         db.close()
+
+
+_SKIP_REASONS = {
+    "busy",
+    "throttled",
+    "timeout",
+    "model_unavailable",
+    "authentication_failed",
+    "cloud_error",
+}
+
+
+def classify_cloud_read(
+    plate_norm: str,
+    confidence: float,
+    *,
+    skipped: str = "",
+    parse_status: str = "",
+) -> tuple[str, bool, bool]:
+    """Map a cloud OCR result to (reason, auto-accept, persist as sighting).
+
+    A Gujarat plate such as GJ08AV5178 is syntax-valid. Rejection at conf 0.60
+    is low_confidence, not syntax_invalid. Auto-alerts still require the
+    confirmation threshold; the sighting is stored for review.
+    """
+    from app.services.plates import syntax_ok
+    from app.services.vehicle_event import is_recordable_plate
+
+    recordable = is_recordable_plate(plate_norm)
+    accepted = recordable and float(confidence or 0.0) >= float(settings.plate_confirmation_median_confidence)
+    if accepted:
+        return "candidate", True, True
+    if skipped in _SKIP_REASONS:
+        return skipped, False, False
+    if parse_status == "invalid_json":
+        return "invalid_json", False, False
+    if not plate_norm:
+        return "ocr_empty", False, False
+    if not syntax_ok(plate_norm):
+        return "syntax_invalid", False, False
+    if float(confidence or 0.0) < float(settings.plate_confirmation_median_confidence):
+        return "low_confidence", False, True
+    return "review", False, True
 
 
 def _failure_reason(exc: Exception) -> str:

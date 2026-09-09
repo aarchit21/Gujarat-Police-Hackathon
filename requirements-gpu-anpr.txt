@@ -1,0 +1,4 @@
+# FastALPR on the A4500. Uninstalls the CPU ORT wheel.
+#   pip uninstall -y onnxruntime
+#   pip install -r requirements-gpu-anpr.txt
+onnxruntime-gpu==1.29.0

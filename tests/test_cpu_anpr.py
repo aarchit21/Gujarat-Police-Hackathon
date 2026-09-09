@@ -26,6 +26,43 @@ def test_plate_quality_rejects_missing_and_tiny_pixels():
     assert tiny.reason == "insufficient_pixels"
 
 
+def test_fast_alpr_rereads_upscaled_crop_when_native_ocr_is_junk(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "cpu_anpr_ocr_min_width", 100)
+    monkeypatch.setattr(settings, "vision_enhancement_enabled", True)
+    frame = np.zeros((80, 200, 3), np.uint8)
+    frame[20:40, 20:71] = 200
+
+    class OCR:
+        def predict(self, crop):
+            if crop.shape[1] >= 100:
+                return {"text": "GJ08AV5178", "confidence": [0.9] * 10}
+            return {"text": "6DDANT7", "confidence": [0.6] * 7}
+
+    class Predictor:
+        ocr = OCR()
+
+        def predict(self, _image):
+            return [{
+                "detection": {"bounding_box": {"x1": 20, "y1": 20, "x2": 71, "y2": 40}, "confidence": 0.7},
+                "ocr": {"text": "6DDANT7", "confidence": [0.6] * 7},
+            }]
+
+    rows = detect_with_fast_alpr(frame, predictor=Predictor())
+    assert len(rows) == 1
+    assert rows[0].plate_norm == "GJ08AV5178"
+    assert rows[0].recognizer == "fast_plate_ocr_enhanced"
+
+
+def test_onnx_providers_cpu_override(monkeypatch):
+    from app.config import settings
+    from app.services.cpu_anpr import onnx_execution_providers
+
+    monkeypatch.setattr(settings, "cpu_anpr_device", "cpu")
+    assert onnx_execution_providers()[0] == "CPUExecutionProvider"
+
+
 def test_fast_alpr_adapter_preserves_raw_and_character_confidence():
     frame = np.zeros((120, 300, 3), np.uint8)
     frame[40:80, 60:220] = _textured_plate()

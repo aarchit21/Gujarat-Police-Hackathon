@@ -135,6 +135,7 @@ def persist_sighting(
     db.flush()
     if not sighting.id:
         raise RuntimeError("sighting row was not persisted")
+    _apply_track_vote(db, sighting, plate_norm, bool(syntax))
     extras = {
         "vehicle_type": vehicle_type,
         "vehicle_make": vehicle_make,
@@ -194,6 +195,34 @@ def persist_sighting(
     camera.source_pts_ms = source_pts_ms
     camera.last_pts_ms = source_pts_ms
     return sighting, alert, created
+
+
+def _apply_track_vote(db: Session, sighting: Sighting, plate_norm: str, syntax: bool) -> None:
+    """Character-wise majority across syntax-valid reads of the same track."""
+    reads: list[str] = []
+    if syntax and plate_norm:
+        reads.append(plate_norm)
+    priors = list(
+        db.scalars(
+            select(Sighting.plate_norm).where(
+                Sighting.camera_id == sighting.camera_id,
+                Sighting.passage_id == sighting.passage_id,
+                Sighting.id != sighting.id,
+                Sighting.syntax_ok.is_(True),
+                Sighting.plate_norm != "",
+            ).order_by(Sighting.id.desc()).limit(7)
+        )
+    )
+    reads.extend(str(item) for item in priors if item)
+    if len(reads) < 2:
+        return
+    consensus = vote(reads)
+    if not (syntax_ok(consensus) or approved_special_format(db, consensus)):
+        return
+    sighting.plate_voted = consensus
+    if consensus == plate_norm or reads.count(consensus) >= 2:
+        sighting.plate_norm = consensus
+        sighting.syntax_ok = True
 
 
 def _confidence_is_eligible(confidence: float, char_confidences: list[float] | None) -> bool:

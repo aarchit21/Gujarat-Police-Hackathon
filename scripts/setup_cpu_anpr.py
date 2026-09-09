@@ -19,16 +19,20 @@ def main() -> int:
 
     from fast_alpr import ALPR
 
+    from app.services.cpu_anpr import _ocr_device_name, onnx_execution_providers
+
     last_error: Exception | None = None
     alpr = None
+    providers = onnx_execution_providers()
+    ocr_device = _ocr_device_name(providers)
     for attempt in range(1, 4):
         try:
             alpr = ALPR(
                 detector_model=settings.cpu_anpr_detector_model,
                 ocr_model=settings.cpu_anpr_ocr_model,
-                detector_providers=["CPUExecutionProvider"],
-                ocr_device="cpu",
-                ocr_providers=["CPUExecutionProvider"],
+                detector_providers=providers,
+                ocr_device=ocr_device,
+                ocr_providers=providers,
             )
             break
         except Exception as exc:
@@ -50,7 +54,8 @@ def main() -> int:
                 digest.update(chunk)
     print(json.dumps({
         "ok": True,
-        "execution_provider": "CPUExecutionProvider",
+        "execution_provider": providers[0] if providers else "CPUExecutionProvider",
+        "ocr_device": ocr_device,
         "detector_model": settings.cpu_anpr_detector_model,
         "ocr_model": settings.cpu_anpr_ocr_model,
         "combined_model_sha256": digest.hexdigest(),
