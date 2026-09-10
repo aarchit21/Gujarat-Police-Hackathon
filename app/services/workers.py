@@ -22,6 +22,19 @@ from app.services.snapshot import maybe_save_live_preview
 from app.services.timing import backoff_seconds
 
 PRIORITY_RANK = {"A": 0, "B": 1, "C": 2, "D": 3}
+CONCURRENCY_STATE_KEY = "max_concurrent_workers"
+CONCURRENCY_MIN = 1
+CONCURRENCY_MAX = 30
+
+
+def clamp_concurrency(n) -> int:
+    """Operator-chosen live slots. Default 4; never a hardcoded 30-camera lock."""
+    fallback = max(CONCURRENCY_MIN, int(settings.max_concurrent_workers or 4))
+    try:
+        value = int(n)
+    except (TypeError, ValueError):
+        value = fallback
+    return max(CONCURRENCY_MIN, min(CONCURRENCY_MAX, value))
 
 
 @dataclass
@@ -60,6 +73,7 @@ class WorkerManager:
         self.hunt_cycle = 0
         self.hunt_target_ids: set[str] = set()
         self.hunt_visited: set[str] = set()
+        self.pin_hold_ids: set[str] = set()
         self.vision_only = False
         self.open_fn = open_video_source
         self.sleep_fn: Callable[[float], None] = time.sleep
@@ -102,8 +116,16 @@ class WorkerManager:
                 return "queued"
             return ""
 
+    def set_concurrency(self, n: int) -> int:
+        value = clamp_concurrency(n)
+        with self._lock:
+            self.max_workers = value
+            self.registry.max_open = value
+        return value
+
     def begin_hunt(self, camera_ids: list[str]) -> None:
         with self._lock:
+            self.pin_hold_ids = set()
             self.hunt_enabled = True
             self.hunt_cycle_id = uuid.uuid4().hex[:12]
             self.hunt_cycle = 1
@@ -112,6 +134,21 @@ class WorkerManager:
             for cid in camera_ids:
                 if cid not in self._queue:
                     self._queue.append(cid)
+
+    def begin_pin(self, camera_ids: list[str]) -> None:
+        """Hold these cameras open. Do not rotate after hunt_dwell_seconds."""
+        with self._lock:
+            self.hunt_enabled = False
+            self.hunt_target_ids = set()
+            self.hunt_visited = set()
+            self.vision_only = False
+            self.pin_hold_ids = set(camera_ids)
+
+    def end_pin(self) -> None:
+        with self._lock:
+            held = set(self.pin_hold_ids)
+            self.pin_hold_ids = set()
+            self._queue = [cid for cid in self._queue if cid not in held]
 
     def end_hunt(self) -> None:
         with self._lock:
@@ -272,6 +309,7 @@ class WorkerManager:
 
     def stop_all(self) -> None:
         self.end_hunt()
+        self.end_pin()
         with self._lock:
             for ev in self._stops.values():
                 ev.set()
@@ -318,6 +356,10 @@ class WorkerManager:
             self.registry.release(camera_id)
             if self.hunt_enabled:
                 self.mark_hunted(camera_id)
+            elif camera_id in self.pin_hold_ids:
+                with self._lock:
+                    if camera_id not in self._queue and camera_id not in self._threads:
+                        self._queue.append(camera_id)
             self._promote_queue()
 
     def _run_batch(self, db, camera: Camera, stop: threading.Event, state: WorkerState) -> None:
@@ -512,6 +554,30 @@ def _sleep_backoff(stop: threading.Event, sleep_fn: Callable[[float], None], att
 
 
 manager = WorkerManager()
+
+
+def persist_concurrency(db, n: int, mgr: WorkerManager | None = None) -> int:
+    from app.models import SystemState
+
+    target = mgr if mgr is not None else manager
+    value = target.set_concurrency(n)
+    row = db.get(SystemState, CONCURRENCY_STATE_KEY)
+    now = datetime.now(timezone.utc)
+    if row is None:
+        db.add(SystemState(key=CONCURRENCY_STATE_KEY, value=str(value), updated_at=now))
+    else:
+        row.value = str(value)
+        row.updated_at = now
+    return value
+
+
+def hydrate_concurrency(db) -> int:
+    from app.models import SystemState
+
+    row = db.get(SystemState, CONCURRENCY_STATE_KEY)
+    if row is None or not str(row.value or "").strip():
+        return manager.set_concurrency(settings.max_concurrent_workers)
+    return manager.set_concurrency(row.value)
 
 
 def reset_manager() -> WorkerManager:

@@ -40,6 +40,7 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "longitude": c.lng,
         "coords_source": c.coords_source or "",
         "coords_are_placeholder": (c.coords_source or "") == "placeholder",
+        "coords_are_inferred": (c.coords_source or "") == "inferred_place",
         "source_type": c.source_type,
         "source_uri_redacted": redact_url(c.source_uri),
         "has_rtsp": bool(c.protected_rtsp_url_or_reference or (c.source_type == "rtsp" and c.source_uri)),

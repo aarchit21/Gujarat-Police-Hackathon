@@ -56,8 +56,8 @@ def test_enhancement_handles_empty_tiny_and_disabled(monkeypatch):
 def test_vision_only_sends_enhanced_context_and_zoom_views(monkeypatch):
     monkeypatch.setattr(settings, "vision_enhancement_enabled", True)
     monkeypatch.setattr(settings, "ollama_vision_enabled", True)
-    monkeypatch.setattr(settings, "ollama_url", "http://127.0.0.1:11434")
-    monkeypatch.setattr(settings, "ollama_api_key", "")
+    monkeypatch.setattr(settings, "ollama_url", "https://ollama.com")
+    monkeypatch.setattr(settings, "ollama_api_key", "unit-ollama-cloud-key")
     monkeypatch.setattr("app.services.ollama_vision._cloud_disabled_reason", "")
     frame = np.full((360, 640, 3), 90, np.uint8)
     frame[180:220, 220:420] = 125

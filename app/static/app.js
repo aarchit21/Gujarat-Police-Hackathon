@@ -35,6 +35,14 @@ function statusClass(s) {
   return "status-blocked";
 }
 
+function coordNote(c, html = true) {
+  let text = "";
+  if (c.coords_are_inferred) text = "Approximate city from camera name — not surveyed GPS.";
+  else if (c.coords_are_placeholder) text = "placeholder map position (catalogue omitted lat/lng)";
+  if (!text) return "";
+  return html ? `${text}<br>` : text;
+}
+
 function resolutionText(c) {
   if (c.width && c.height) return `${c.width}×${c.height}`;
   return "—";
@@ -112,11 +120,22 @@ async function loadCoverage() {
     demo.textContent = `Demo · analytics ${h.analytics_active_count || 0} running · last sighting ${h.last_sighting_plate || "—"} @ ${h.last_sighting_camera || "—"} ${formatWhen(h.last_sighting_at)} · ${ollamaVisionText(h)}`;
   }
   const huntEl = document.getElementById("huntStrip");
+  const hunt = h.hunt || {};
+  const slots = hunt.max_concurrent || (h.capacity && h.capacity.max_concurrent) || 4;
   if (huntEl) {
-    const hunt = h.hunt || {};
     huntEl.textContent = hunt.label
-      || `Hunt ${hunt.enabled ? "on" : "idle"} · hunting ${hunt.hunting_count || 0}/${hunt.total || 30} · visited ${hunt.visited_count || 0}/${hunt.total || 30} · vehicles ${hunt.vehicles_seen || 0} · plates ${hunt.plates_read || 0}. 4 slots on this host, not 30 simultaneous decodes.`;
+      || `Hunt ${hunt.enabled ? "on" : "idle"} · hunting ${hunt.hunting_count || 0}/${hunt.total || 0} · visited ${hunt.visited_count || 0}/${hunt.total || 0} · vehicles ${hunt.vehicles_seen || 0} · plates ${hunt.plates_read || 0}. ${slots} concurrent slots on this host, not all catalogue cameras at once.`;
   }
+  document.querySelectorAll(".js-max-concurrent").forEach((el) => {
+    if (document.activeElement !== el) el.value = String(slots);
+  });
+}
+
+function concurrentFromUi() {
+  const el = document.querySelector(".js-max-concurrent");
+  const n = Number(el && el.value);
+  if (!Number.isFinite(n) || n < 1) return 4;
+  return Math.min(30, Math.floor(n));
 }
 
 function cameraBucket(c) {
@@ -145,7 +164,7 @@ function renderLedger() {
       pts.push([c.lat, c.lng]);
       const marker = L.circleMarker([c.lat, c.lng], { radius: 7, color, fillOpacity: 0.85 })
         .bindPopup(
-          `<b>${c.id}</b> · ${c.origin || ""}<br>${c.city || "location omitted"} · ${c.department}<br>${c.coords_are_placeholder ? "placeholder map position (catalogue omitted lat/lng)<br>" : ""}cat live ${c.catalogue_live} · decode ${c.decode_status}<br>hunting ${c.analytics_active ? "now" : "no"} · last hunted ${c.last_hunted_at_ist || "—"}<br>${c.status}: ${c.status_reason || ""}`
+          `<b>${c.id}</b> · ${c.origin || ""}<br>${c.city || "location omitted"} · ${c.department}<br>${coordNote(c)}cat live ${c.catalogue_live} · decode ${c.decode_status}<br>hunting ${c.analytics_active ? "now" : "no"} · last hunted ${c.last_hunted_at_ist || "—"}<br>${c.status}: ${c.status_reason || ""}`
         )
         .addTo(markers);
       marker.on("click", () => showCamera(c));
@@ -172,7 +191,7 @@ function showCamera(c) {
       <div class="row"><label class="muted">Plate recognition for this camera
         <select data-plate-mode><option value="inherit" ${c.plate_recognition_mode === "inherit" ? "selected" : ""}>inherit global setting</option><option value="on" ${c.plate_recognition_mode === "on" ? "selected" : ""}>on when global is on</option><option value="off" ${c.plate_recognition_mode === "off" ? "selected" : ""}>off for this camera</option></select>
       </label></div>
-      <div class="muted">${c.coords_are_placeholder ? "Map position is a placeholder — catalogue omitted lat/lng." : ""}</div>
+      <div class="muted">${coordNote(c, false)}</div>
       <div class="muted">${c.hls_preview_blocked ? "HLS stays server-side. Use Live frame." : ""}</div>
       <div class="row" style="margin-top:6px">
         <button data-prev="snapshot">Live frame</button>
@@ -822,18 +841,13 @@ document.getElementById("btnMeasure").onclick = async () => {
   }
 };
 async function startHunt() {
-  const out = await j("/api/hunt/start", { method: "POST" });
+  const out = await j("/api/hunt/start", { method: "POST", body: JSON.stringify({ max_concurrent: concurrentFromUi() }) });
   alert(out.disclaimer || out.label || `Hunt started. Hunting ${(out.hunting || []).length}/${out.total || 0}.`);
   refresh();
 }
 async function pinHunt() {
-  const out = await j("/api/hunt/pin", { method: "POST" });
+  const out = await j("/api/hunt/pin", { method: "POST", body: JSON.stringify({ max_concurrent: concurrentFromUi() }) });
   alert(out.disclaimer || `Pinned ${(out.started || []).length} working cameras. Queued ${(out.queued || []).length}.`);
-  refresh();
-}
-async function visionOnlyHunt() {
-  const out = await j("/api/hunt/vision-only", { method: "POST" });
-  alert(out.disclaimer || `Pinned ${(out.started || []).length}.`);
   refresh();
 }
 async function stopHunt() {
@@ -844,14 +858,20 @@ document.getElementById("btnHuntStart").onclick = startHunt;
 document.getElementById("btnHuntStop").onclick = stopHunt;
 const huntPin = document.getElementById("btnHuntPin");
 if (huntPin) huntPin.onclick = pinHunt;
-const huntVision = document.getElementById("btnHuntVision");
-if (huntVision) huntVision.onclick = visionOnlyHunt;
 const huntStart2 = document.getElementById("btnHuntStart2");
 const huntStop2 = document.getElementById("btnHuntStop2");
 if (huntStart2) huntStart2.onclick = startHunt;
 if (huntStop2) huntStop2.onclick = stopHunt;
 const huntPin2 = document.getElementById("btnHuntPin2");
 if (huntPin2) huntPin2.onclick = pinHunt;
+document.querySelectorAll(".js-max-concurrent").forEach((el) => {
+  el.addEventListener("change", () => {
+    const n = concurrentFromUi();
+    document.querySelectorAll(".js-max-concurrent").forEach((other) => {
+      other.value = String(n);
+    });
+  });
+});
 document.getElementById("btnStartAccessible").onclick = async () => {
   const out = await j("/api/workers/start-accessible", {
     method: "POST",

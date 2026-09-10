@@ -81,9 +81,9 @@ class Settings(BaseSettings):
     remote_inference_allowed_hosts: str = ""
     remote_fallback_local: bool = True
 
-    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_url: str = "https://ollama.com"
     ollama_api_key: str = ""
-    ollama_vision_model: str = "qwen3-vl:8b"
+    ollama_vision_model: str = "gemma4:31b"
     ollama_vision_enabled: bool = True
     ollama_vision_on_own_feed: bool = True
     ollama_vision_timeout_seconds: float = 90.0
@@ -100,28 +100,42 @@ class Settings(BaseSettings):
     lpdgan_device: str = "auto"
     vision_only_enabled: bool = False
     vision_only_interval_seconds: float = 8.0
-    vision_only_models: str = "qwen3-vl:8b"
+    vision_only_models: str = "gemma4:31b"
 
     yolo_enabled: bool = True
     yolo_weights: str = "yolov8n.pt"
     yolo_device: str = "auto"
     yolo_conf: float = 0.35
     yolo_max_crops: int = 2
+    vehicle_crop_pad_x: float = 0.20
+    vehicle_crop_pad_top: float = 0.15
+    vehicle_crop_pad_bottom: float = 0.45
     vehicle_max_detections: int = 8
+    lpdnet_enabled: bool = True
+    lpdnet_weights_dir: str = "data/models/lpdnet"
+    lpdnet_onnx: str = "LPDNet_usa_pruned_tao5.onnx"
+    lpdnet_conf: float = 0.30
+    lpdnet_device: str = "auto"
     vehicle_attribute_refinement_enabled: bool = True
-    vehicle_attribute_model: str = "qwen3-vl:8b"
+    vehicle_attribute_model: str = "gemma4:31b"
     vehicle_attribute_queue_size: int = 16
     vehicle_attribute_max_age_seconds: float = 20.0
     vehicle_attribute_min_confidence: float = 0.65
-    # Hunt capture slots = max_open_captures; they rotate across the catalogue.
+    # Hunt capture slots rotate across the catalogue. Pin holds slots without rotating.
     hunt_dwell_seconds: float = 28.0
     hunt_max_frames: int = 40
     rtsp_open_wait_seconds: float = 6.0
+    # Sequential decode probe. Independent of max concurrent workers — do not walk 30 RTSP URLs per click.
+    measure_batch_size: int = 4
+    measure_probe_timeout_seconds: float = 6.0
 
     vendor_max_payload_bytes: int = 64_000
     max_upload_bytes: int = 8_000_000
 
-    max_concurrent_workers: int = 4
+    max_concurrent_workers: int = Field(
+        default=4,
+        validation_alias=AliasChoices("MAX_CONCURRENT_WORKERS", "max_concurrent_workers"),
+    )
     max_open_captures: int = Field(
         default=4,
         validation_alias=AliasChoices("MAX_CONCURRENT_CAPTURES", "MAX_OPEN_CAPTURES", "max_open_captures"),

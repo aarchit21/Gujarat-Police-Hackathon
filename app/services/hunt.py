@@ -1,8 +1,8 @@
 """Time-multiplex analytics across all live catalogue cameras.
 
-This host holds 4 RTSP captures. Hunt rotates those slots so every live
-government feed is visited. It does not open 30 streams at once and is
-not a central VMS.
+Concurrent RTSP slots are operator-chosen (default 4). Hunt rotates those
+slots so every live government feed is visited. It does not open every
+catalogue stream at once and is not a central VMS.
 """
 from __future__ import annotations
 
@@ -20,6 +20,20 @@ from app.services.vehicle_event import is_recordable_plate
 
 
 PIN_DEFAULT = ("cam01", "cam02", "cam03", "cam05")
+
+
+def slot_count() -> int:
+    """Configured live RTSP slots. Operator UI/env can change this; it is not locked to 30."""
+    return max(1, int(settings.max_concurrent_workers or 4))
+
+
+def decode_ok_pin_ids(db: Session, n: int | None = None) -> list[str]:
+    """First N decode-ok live cameras, then untested, filling the chosen capture slots."""
+    count = max(1, int(n if n is not None else slot_count()))
+    cams = hunt_targets(db, pinned_only=False)
+    ok = [c.id for c in cams if c.decode_status == "ok"]
+    rest = [c.id for c in cams if c.id not in ok]
+    return (ok + rest)[:count]
 
 
 def hunt_targets(db: Session, *, pinned_only: bool = False, pin_ids: list[str] | None = None) -> list[Camera]:
@@ -60,7 +74,16 @@ def start_hunt(
     pinned_only: bool = False,
     pin_ids: list[str] | None = None,
     vision_only: bool = False,
+    max_concurrent: int | None = None,
 ) -> dict:
+    from app.services.workers import persist_concurrency
+
+    if max_concurrent is not None:
+        slots = persist_concurrency(db, max_concurrent, mgr=manager)
+    else:
+        slots = max(1, int(getattr(manager, "max_workers", None) or slot_count()))
+    if pinned_only and not pin_ids:
+        pin_ids = decode_ok_pin_ids(db, slots)
     targets = hunt_targets(db, pinned_only=pinned_only, pin_ids=pin_ids)
     promoted = []
     for cam in targets:
@@ -68,13 +91,24 @@ def start_hunt(
             promoted.append(cam.id)
     db.commit()
 
+    prev = set(getattr(manager, "hunt_target_ids", set()) or set()) | set(getattr(manager, "pin_hold_ids", set()) or set())
+    manager.end_hunt()
+    if hasattr(manager, "end_pin"):
+        manager.end_pin()
+    for camera_id in prev:
+        manager.stop(db, camera_id, actor=actor)
+
     manager.vision_only = bool(vision_only)
-    manager.begin_hunt([c.id for c in targets])
+    target_ids = [c.id for c in targets]
+    if pinned_only:
+        manager.begin_pin(target_ids)
+    else:
+        manager.begin_hunt(target_ids)
 
     running = [
         w.get("camera_id")
         for w in manager.snapshot().get("workers", [])
-        if w.get("camera_id") in manager.hunt_target_ids
+        if w.get("camera_id") in set(target_ids)
     ]
     for camera_id in running:
         manager.stop(db, camera_id, actor=actor)
@@ -109,13 +143,18 @@ def start_hunt(
             "pinned_only": pinned_only,
             "vision_only": bool(getattr(manager, "vision_only", False)),
             "disclaimer": (
-                "Vision-only A/B: full-frame Gemma then GLM 5.3 Flash. YOLO still runs. "
-                "Pinned to 4 working live cameras."
+                f"Vision-only A/B on {slots} pinned live cameras. YOLO still runs."
                 if vision_only
-                else "Pinned to 4 working live cameras."
+                else (
+                    f"Pinned {len(targets)} working cameras ({slots} concurrent slots). "
+                    "These stay open and reconnect; they do not rotate after 28s. "
+                    "Change Max concurrent cameras to pin a different count."
+                )
                 if pinned_only
-                else "This host hunts 4 government streams at a time and visits all live catalogue "
-                "cameras each cycle. Not 30 simultaneous decodes. Not a central VMS."
+                else (
+                    f"This host hunts {slots} government streams at a time and visits all live catalogue "
+                    "cameras each cycle. Not every catalogue camera at once. Not a central VMS."
+                )
             ),
         }
     )
@@ -123,8 +162,10 @@ def start_hunt(
 
 
 def stop_hunt(manager, db: Session, *, actor: str = "operator") -> dict:
-    ids = list(manager.hunt_target_ids)
+    ids = list(set(manager.hunt_target_ids) | set(getattr(manager, "pin_hold_ids", set()) or set()))
     manager.end_hunt()
+    if hasattr(manager, "end_pin"):
+        manager.end_pin()
     for camera_id in ids:
         manager.stop(db, camera_id, actor=actor)
     db.add(AuditEvent(actor=actor, action="hunt_stop", detail=f"stopped={len(ids)}"))
@@ -134,7 +175,8 @@ def stop_hunt(manager, db: Session, *, actor: str = "operator") -> dict:
 
 def hunt_status(manager, db: Session) -> dict:
     snap = manager.snapshot()
-    targets = list(manager.hunt_target_ids)
+    pinned_ids = list(getattr(manager, "pin_hold_ids", set()) or set())
+    targets = list(manager.hunt_target_ids) or pinned_ids
     visited = sorted(manager.hunt_visited)
     gov_ids = targets or [c.id for c in hunt_targets(db)]
     vehicles = 0
@@ -160,7 +202,8 @@ def hunt_status(manager, db: Session) -> dict:
         names = [m.strip() for m in (settings.vision_only_models or "").split(",") if m.strip()]
         vo = " · vision-only " + (" then ".join(names) if names else "on")
     return {
-        "enabled": bool(manager.hunt_enabled),
+        "enabled": bool(manager.hunt_enabled or pinned_ids),
+        "pinned": bool(pinned_ids),
         "cycle_id": manager.hunt_cycle_id,
         "cycle": manager.hunt_cycle,
         "hunting": hunting,
@@ -178,10 +221,16 @@ def hunt_status(manager, db: Session) -> dict:
         "max_frames": settings.hunt_max_frames,
         "last_hunted": last_hunted,
         "label": (
-            f"Hunting {len(hunting)}/{total} · visited {len(visited)}/{total} this cycle · "
+            f"Pinned {len(hunting)}/{len(pinned_ids)} working cameras (held open, not rotating) · "
+            f"{vehicles} vehicles · {plates} plates"
+            if pinned_ids and not manager.hunt_enabled
+            else f"Hunting {len(hunting)}/{total} · visited {len(visited)}/{total} this cycle · "
             f"{vehicles} vehicles · {plates} plates{vo}"
             if manager.hunt_enabled
-            else "Hunt idle — this host can run 4 live streams at a time"
+            else (
+                f"Hunt idle — {snap.get('max_concurrent') or slot_count()} live streams at a time. "
+                "Set Max concurrent cameras, then pin working cameras or hunt all live feeds."
+            )
         ),
     }
 

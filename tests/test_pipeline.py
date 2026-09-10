@@ -270,7 +270,8 @@ def test_live_plate_localization_uses_fast_alpr_on_vehicle_crop_only(db, monkeyp
         }],
     )
     out = _read_plate(cam, frame, provider_kind="local_worker", reader=None, remote_client=None, local_hash="x", allow_cloud=False)
-    assert calls == [(frame.shape, False), (vehicle.shape, False)]
+    assert calls[0] == (frame.shape, False)
+    assert (vehicle.shape, False) in calls
     assert out["detector"] == "fast_alpr"
     assert out["box"] == (100, 90, 120, 30)
     assert out["localization_accepted"] is True

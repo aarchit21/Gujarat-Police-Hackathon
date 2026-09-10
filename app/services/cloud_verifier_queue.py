@@ -174,10 +174,10 @@ def _process_job(job: CloudJob) -> None:
             )
     else:
         enhanced, enhancement = enhance_for_vision(
-            job.image, profile="plate" if job.detector in {"fast_alpr", "opencv_plate"} else "vehicle",
-            min_width=400 if job.detector in {"fast_alpr", "opencv_plate"} else 320,
+            job.image, profile="plate" if job.detector in {"fast_alpr", "lpdnet", "opencv_plate"} else "vehicle",
+            min_width=400 if job.detector in {"fast_alpr", "lpdnet", "opencv_plate"} else 320,
         )
-        if job.detector in {"fast_alpr", "opencv_plate"}:
+        if job.detector in {"fast_alpr", "lpdnet", "opencv_plate"}:
             read = infer_bgr(enhanced, prepared=True, enhancement=enhancement)
             raw, norm, confidence = read.plate_raw, read.plate_norm, float(read.confidence or 0.0)
             model_id = read.model_id
@@ -190,9 +190,9 @@ def _process_job(job: CloudJob) -> None:
         evidence_crop = job.image
         vision_only = None
         recognizer = "ollama_vision"
-        raw_output = str(payload.get("raw_response") or raw) if job.detector not in {"fast_alpr", "opencv_plate"} else raw
-        parse_status = str(payload.get("parse_status") or "") if job.detector not in {"fast_alpr", "opencv_plate"} else "json"
-        skipped = str(payload.get("skipped") or "") if job.detector not in {"fast_alpr", "opencv_plate"} else ""
+        raw_output = str(payload.get("raw_response") or raw) if job.detector not in {"fast_alpr", "lpdnet", "opencv_plate"} else raw
+        parse_status = str(payload.get("parse_status") or "") if job.detector not in {"fast_alpr", "lpdnet", "opencv_plate"} else "json"
+        skipped = str(payload.get("skipped") or "") if job.detector not in {"fast_alpr", "lpdnet", "opencv_plate"} else ""
     latency = (time.perf_counter() - started) * 1000.0
     skip_reason = {
         "error": "cloud_error", "cloud_disabled": "authentication_failed",

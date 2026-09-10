@@ -1,7 +1,6 @@
 """Discover cameras from GET INGEST_CATALOGUE_URL. Never construct stream URLs."""
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -15,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import AuditEvent, Camera, SystemState
 from app.security import redact_secrets, redact_url
+from app.services.places import infer_map_position, inland_placeholder
 
 GET_ONLY = True  # consume-only: never publish, never call a control API
 AUTH_MODES = ("none", "bearer", "basic", "custom_header", "form")
@@ -304,13 +304,13 @@ def upsert_from_catalogue(db: Session, item: dict, *, synced_at: datetime | None
     created = camera is None
     live = _catalogue_live_flag(item)
     if created:
-        lat, lng, coords_source = _resolve_coords(cam_id, item, None)
+        lat, lng, coords_source, place_label = _resolve_coords(cam_id, item, None)
         has_rtsp = bool(item.get("rtsp_url"))
         camera = Camera(
             id=cam_id,
             name=item.get("name") or cam_id,
             department=item.get("department") or "government-catalogue",
-            city=item.get("location") or "",
+            city=item.get("location") or (place_label if coords_source == "inferred_place" else ""),
             lat=lat,
             lng=lng,
             coords_source=coords_source,
@@ -334,10 +334,14 @@ def upsert_from_catalogue(db: Session, item: dict, *, synced_at: datetime | None
     camera.catalogue_live = live
     if live and (camera.network_class or "offline") == "offline":
         camera.network_class = "limited"
-    lat, lng, coords_source = _resolve_coords(cam_id, item, camera)
+    lat, lng, coords_source, place_label = _resolve_coords(cam_id, item, camera)
     camera.lat = lat
     camera.lng = lng
     camera.coords_source = coords_source
+    if item.get("location"):
+        camera.city = item["location"]
+    elif coords_source == "inferred_place" and place_label and not (camera.city or "").strip():
+        camera.city = place_label
     camera.codec = item.get("codec") or camera.codec
     if item.get("width"):
         camera.width = item["width"]
@@ -357,8 +361,6 @@ def upsert_from_catalogue(db: Session, item: dict, *, synced_at: datetime | None
         camera.whep_url = item["whep_url"]
     if item.get("name") and created:
         camera.name = item["name"]
-    if item.get("location") and created:
-        camera.city = item["location"]
     camera.catalogue_synced_at = now
     camera.analytics_active = bool(camera.analytics_active)
     return camera
@@ -464,17 +466,9 @@ def _catalogue_live_flag(item: dict) -> bool:
 
 
 def placeholder_coordinates(camera_id: str) -> tuple[float, float]:
-    """Stable unique offset across Gujarat. Not a surveyed camera site."""
-    digits = "".join(ch for ch in (camera_id or "") if ch.isdigit())
-    if digits:
-        n = int(digits)
-    else:
-        n = int(hashlib.md5((camera_id or "cam").encode("utf-8")).hexdigest()[:8], 16)
-    col = n % 6
-    row = (n // 6) % 6
-    lat = 21.5 + row * 0.45 + ((n * 17) % 10) * 0.012
-    lng = 69.7 + col * 0.55 + ((n * 13) % 10) * 0.012
-    return round(lat, 6), round(lng, 6)
+    """Stable inland city. Not a surveyed camera site. Avoids the gulfs."""
+    pos = inland_placeholder(camera_id)
+    return pos.lat, pos.lng
 
 
 def _is_stacked_placeholder(lat, lng) -> bool:
@@ -490,20 +484,49 @@ def _is_stacked_placeholder(lat, lng) -> bool:
     return abs(lat_f - PLACEHOLDER_CENTER[0]) < 1e-9 and abs(lng_f - PLACEHOLDER_CENTER[1]) < 1e-9
 
 
-def _resolve_coords(cam_id: str, item: dict, existing: Camera | None) -> tuple[float, float, str]:
-    if item.get("lat") is not None and item.get("lng") is not None:
-        return float(item["lat"]), float(item["lng"]), "catalogue"
-    if existing is not None and (existing.coords_source or "") == "catalogue":
-        return existing.lat, existing.lng, "catalogue"
-    if existing is not None and not _is_stacked_placeholder(existing.lat, existing.lng):
-        source = existing.coords_source or "placeholder"
-        return existing.lat, existing.lng, source
-    lat, lng = placeholder_coordinates(cam_id)
-    return lat, lng, "placeholder"
+def _valid_latlng(lat, lng) -> bool:
+    if lat is None or lng is None:
+        return False
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except (TypeError, ValueError):
+        return False
+    if lat_f == 0.0 and lng_f == 0.0:
+        return False
+    return -90.0 <= lat_f <= 90.0 and -180.0 <= lng_f <= 180.0
+
+
+def _resolve_coords(cam_id: str, item: dict, existing: Camera | None) -> tuple[float, float, str, str]:
+    if _valid_latlng(item.get("lat"), item.get("lng")):
+        return float(item["lat"]), float(item["lng"]), "catalogue", str(item.get("location") or "")
+    if existing is not None and (existing.coords_source or "") == "catalogue" and not _is_stacked_placeholder(
+        existing.lat, existing.lng
+    ):
+        return existing.lat, existing.lng, "catalogue", existing.city or ""
+    if existing is not None and (existing.coords_source or "") == "own_feed":
+        return existing.lat, existing.lng, "own_feed", existing.city or ""
+    name = str(item.get("name") or (existing.name if existing is not None else "") or cam_id)
+    city = str(item.get("location") or (existing.city if existing is not None else "") or "")
+    pos = infer_map_position(cam_id, name=name, city=city)
+    return pos.lat, pos.lng, pos.source, pos.label
+
+
+def _apply_inferred_position(cam: Camera) -> bool:
+    if (cam.coords_source or "") in {"catalogue", "own_feed"} and not _is_stacked_placeholder(cam.lat, cam.lng):
+        return False
+    pos = infer_map_position(cam.id, name=cam.name or "", city=cam.city or "")
+    changed = cam.lat != pos.lat or cam.lng != pos.lng or cam.coords_source != pos.source
+    cam.lat, cam.lng = pos.lat, pos.lng
+    cam.coords_source = pos.source
+    if pos.source == "inferred_place" and pos.label and not (cam.city or "").strip():
+        cam.city = pos.label
+        changed = True
+    return changed
 
 
 def backfill_catalogue_display(db: Session) -> int:
-    """Fix stacked centroid markers and live=false on id+name catalogue rows."""
+    """Fix stacked/offshore placeholders and live=false on id+name catalogue rows."""
     changed = 0
     rows = list(db.scalars(select(Camera).where(Camera.catalogue_camera_id.is_not(None))))
     for cam in rows:
@@ -514,14 +537,8 @@ def backfill_catalogue_display(db: Session) -> int:
         if not missing and (cam.network_class or "offline") == "offline":
             cam.network_class = "limited"
             changed += 1
-        if (cam.coords_source or "") != "catalogue" and (
-            cam.coords_source == "placeholder" or _is_stacked_placeholder(cam.lat, cam.lng)
-        ):
-            lat, lng = placeholder_coordinates(cam.id)
-            if cam.lat != lat or cam.lng != lng or cam.coords_source != "placeholder":
-                cam.lat, cam.lng = lat, lng
-                cam.coords_source = "placeholder"
-                changed += 1
+        if _apply_inferred_position(cam):
+            changed += 1
     return changed
 
 

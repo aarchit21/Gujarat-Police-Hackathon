@@ -16,7 +16,7 @@ from app.services.coverage import camera_origin
 from app.services.ingest import rtsp_url_for
 from app.services.network_check import probe_one_rtsp
 from app.services.processing import PRIORITY_CLASSES
-from app.services.workers import PRIORITY_RANK
+from app.services.workers import PRIORITY_RANK, manager
 
 
 def calibrated_target_fps(measured_fps: float, requested_fps: float) -> float:
@@ -117,10 +117,16 @@ def measure_government_decode(
     *,
     limit: int | None = None,
     probe_fn=None,
-    timeout: float = 12.0,
+    timeout: float | None = None,
+    retest_failed: bool = False,
 ) -> dict:
-    """Sequentially probe a bounded set of catalogue RTSP URLs. Never fans out all streams."""
-    cap = int(limit or min(settings.max_open_captures, 4))
+    """Sequentially probe a small batch of untested catalogue RTSP URLs.
+
+    Never fans out all streams. Batch size is independent of max concurrent workers
+    so raising pin slots does not turn Measure into a 30× timeout walk.
+    """
+    cap = int(limit or max(1, int(getattr(settings, "measure_batch_size", None) or 4)))
+    wait = float(timeout if timeout is not None else getattr(settings, "measure_probe_timeout_seconds", 6.0) or 6.0)
     probe = probe_fn or probe_one_rtsp
     gov = [
         c
@@ -130,9 +136,14 @@ def measure_government_decode(
     untested = [c for c in gov if (c.decode_status or "untested") == "untested"]
     failed = [c for c in gov if c.decode_status == "failed"]
     already_ok = [c.id for c in gov if c.decode_status == "ok"]
-    failed_known = [c for c in failed if c.width]
-    failed_other = [c for c in failed if not c.width]
-    queue = untested + failed_known + failed_other
+    if untested:
+        queue = untested
+    elif retest_failed:
+        failed_known = [c for c in failed if c.width]
+        failed_other = [c for c in failed if not c.width]
+        queue = failed_known + failed_other
+    else:
+        queue = []
     batch = queue[:cap]
     tested = []
     ok_ids = []
@@ -140,7 +151,7 @@ def measure_government_decode(
     for cam in batch:
         url = rtsp_url_for(cam)
         t0 = time.monotonic()
-        result = probe(url, timeout=timeout)
+        result = probe(url, timeout=wait)
         elapsed = time.monotonic() - t0
         cam.decode_tested_at = datetime.now(timezone.utc)
         if result.get("ok") and result.get("frame"):
@@ -175,16 +186,19 @@ def measure_government_decode(
             }
         )
     elapsed_all = time.monotonic() - wall
+    remaining_untested = sum(1 for c in gov if (c.decode_status or "untested") == "untested")
+    remaining_failed = sum(1 for c in gov if c.decode_status == "failed")
     fps_values = [c.measured_worker_fps for c in db.scalars(select(Camera)) if c.id in ok_ids and c.measured_worker_fps]
     host_fps = min(fps_values) if fps_values else 0.0
     requested = float(settings.analysis_fps)
-    recommended = calibrated_target_fps(host_fps, requested)
+    recommended = calibrated_target_fps(host_fps, requested) if fps_values else float(_state_get(db, "recommended_target_fps") or requested)
     now = datetime.now(timezone.utc)
-    _state(db, "measured_safe_fps", str(host_fps), now)
-    _state(db, "recommended_target_fps", str(recommended), now)
-    _state(db, "government_decode_ok_count", str(len(ok_ids)), now)
-    _state(db, "government_decode_tested_count", str(len(tested)), now)
-    if recommended + 1e-9 < requested:
+    if tested:
+        _state(db, "measured_safe_fps", str(host_fps), now)
+        _state(db, "recommended_target_fps", str(recommended), now)
+        _state(db, "government_decode_tested_count", str(len(tested)), now)
+    _state(db, "government_decode_ok_count", str(len(already_ok) + len(ok_ids)), now)
+    if tested and recommended + 1e-9 < requested:
         for cam in db.scalars(select(Camera)):
             if cam.id in ok_ids:
                 cam.target_analysis_fps = recommended
@@ -195,10 +209,26 @@ def measure_government_decode(
     db.add(
         AuditEvent(
             action="capacity_measure",
-            detail=f"tested={len(tested)} ok={len(ok_ids)} measured_fps={host_fps} recommended={recommended}",
+            detail=f"tested={len(tested)} ok={len(ok_ids)} measured_fps={host_fps} recommended={recommended} retest_failed={retest_failed}",
         )
     )
     db.commit()
+    if not batch:
+        disclaimer = (
+            f"No untested catalogue cameras left. {len(already_ok)} already decode-ok, "
+            f"{remaining_failed} previously failed. Measure does not re-wait {wait:.0f}s on failed RTSP. "
+            "Use Pin working cameras to run analytics. Pass retest_failed to retry dead feeds."
+        )
+    elif not untested and retest_failed:
+        disclaimer = (
+            f"Retested up to {cap} previously-failed cameras ({wait:.0f}s each, sequential). "
+            "Not a 30-camera simultaneous test. Use Pin working cameras for decode-ok feeds."
+        )
+    else:
+        disclaimer = (
+            f"Sequential decode probe of the next {len(tested)} untested cameras ({wait:.0f}s cap each). "
+            "Repeat Measure to walk the rest. Decode-ok is not a running worker — use Pin working cameras."
+        )
     return {
         "ok": True,
         "tested": tested,
@@ -206,26 +236,23 @@ def measure_government_decode(
         "decode_ok_count": len(ok_ids),
         "tested_count": len(tested),
         "limit": cap,
+        "probe_timeout_s": wait,
+        "retest_failed": retest_failed,
         "already_decode_ok": already_ok,
-        "catalogue_remaining_untested": sum(
-            1 for c in gov if (c.decode_status or "untested") == "untested"
-        ),
-        "catalogue_remaining_failed": sum(1 for c in gov if c.decode_status == "failed"),
-        "measured_safe_fps": host_fps,
+        "catalogue_remaining_untested": remaining_untested,
+        "catalogue_remaining_failed": remaining_failed,
+        "measured_safe_fps": host_fps if tested else _state_get(db, "measured_safe_fps"),
         "requested_fps_hypothesis": requested,
         "recommended_target_fps": recommended,
-        "sampling_reduced": recommended + 1e-9 < requested,
+        "sampling_reduced": bool(tested) and recommended + 1e-9 < requested,
         "elapsed_s": round(elapsed_all, 3),
-        "disclaimer": (
-            (
-                "Retesting cameras that previously failed to open (none left untested). "
-                if not untested
-                else "Sequential decode probe of the next untested cameras, then previously-failed. "
-            )
-            + "Not an 80,000-camera test. Repeat Measure to walk the rest. "
-            "Decode ok is not a running worker — use Pin 4 working cameras after a decode-ok."
-        ),
+        "disclaimer": disclaimer,
     }
+
+
+def _state_get(db: Session, key: str) -> str:
+    row = db.get(SystemState, key)
+    return row.value if row else ""
 
 
 def _state(db: Session, key: str, value: str, now: datetime) -> None:
@@ -248,6 +275,7 @@ def capacity_snapshot(db: Session) -> dict:
         "government_decode_ok_count": _val("government_decode_ok_count"),
         "government_decode_tested_count": _val("government_decode_tested_count"),
         "analysis_fps_hypothesis": settings.analysis_fps,
-        "max_concurrent_captures": settings.max_open_captures,
+        "max_concurrent": manager.max_workers,
+        "max_concurrent_captures": manager.registry.max_open,
         "priority_classes": list(PRIORITY_CLASSES),
     }

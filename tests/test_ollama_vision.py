@@ -27,24 +27,17 @@ def test_parse_vision_json():
     assert conf == 0.8
 
 
-def test_resolve_prefers_installed_candidate(monkeypatch):
-    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "")
-    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "http://127.0.0.1:11434")
-    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_model", "llava:7b")
-    assert resolve_vision_model(["llama3:8b", "llava:7b"]) == "llava:7b"
-
-
-def test_local_url_is_not_rewritten_when_api_key_is_set(monkeypatch):
+def test_local_url_is_rewritten_to_cloud(monkeypatch):
     monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "http://127.0.0.1:11434")
     monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "unit-leftover-cloud-key")
-    assert effective_ollama_url() == "http://127.0.0.1:11434"
+    assert effective_ollama_url() == "https://ollama.com"
 
 
-def test_resolve_prefers_qwen3_vl_8b_when_installed(monkeypatch):
-    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "")
+def test_resolve_maps_local_qwen_to_cloud_gemma(monkeypatch):
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "k")
     monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "http://127.0.0.1:11434")
     monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_model", "qwen3-vl:8b")
-    assert resolve_vision_model(["llama3:8b", "qwen3-vl:8b"]) == "qwen3-vl:8b"
+    assert resolve_vision_model(["qwen3-vl:8b", "gemma4:31b"]) == "gemma4:31b"
 
 
 def test_should_use_vision_when_enabled(db, monkeypatch):
@@ -60,24 +53,25 @@ def test_should_use_vision_when_enabled(db, monkeypatch):
 
 def test_infer_bgr_success_with_mock(monkeypatch):
     monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_enabled", True)
-    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "http://127.0.0.1:11434")
-    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "")
-    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_model", "llava:7b")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_url", "https://ollama.com")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_api_key", "unit-ollama-cloud-key")
+    monkeypatch.setattr("app.services.ollama_vision.settings.ollama_vision_model", "gemma4:31b")
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "ollama.com"
         assert request.url.path == "/api/chat"
         body = request.read()
         assert b"GJ01AB1234" not in body
         return httpx.Response(
             200,
-            json={"message": {"content": '{"plate_text":"GJ05CD8888","confidence":0.7}'}, "model": "llava:7b"},
+            json={"message": {"content": '{"plate_text":"GJ05CD8888","confidence":0.7}'}, "model": "gemma4:31b"},
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     frame = np.zeros((80, 160, 3), dtype=np.uint8)
-    read = infer_bgr(frame, client=client, model="llava:7b")
+    read = infer_bgr(frame, client=client, model="gemma4:31b")
     assert read.plate_norm == "GJ05CD8888"
-    assert read.model_id == "ollama:llava:7b"
+    assert read.model_id == "ollama:gemma4:31b"
 
 
 def test_infer_rejects_non_local_host(monkeypatch):

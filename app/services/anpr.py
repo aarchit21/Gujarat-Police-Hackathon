@@ -191,16 +191,31 @@ def bumper_crop(bgr: np.ndarray, box: tuple[int, int, int, int] | None) -> np.nd
     x, y, bw, bh = [int(v) for v in box[:4]]
     if bw < 8 or bh < 8:
         return None
-    pad_x = max(2, int(0.06 * bw))
+    pad_x = max(2, int(0.20 * bw))
+    extra_below = max(4, int(0.45 * bh))
     x0 = max(0, x - pad_x)
     x1 = min(w, x + bw + pad_x)
-    y0 = max(0, y + int(0.48 * bh))
-    y1 = min(h, y + bh + max(2, int(0.08 * bh)))
+    y0 = max(0, y + int(0.45 * bh))
+    y1 = min(h, y + bh + extra_below)
     if y1 - y0 < 8 or x1 - x0 < 8:
         y0 = max(0, y)
         y1 = min(h, y + bh)
     crop = bgr[y0:y1, x0:x1]
     return None if crop.size == 0 else crop
+
+
+def bumper_roi(bgr: np.ndarray, box: tuple[int, int, int, int] | None) -> tuple[np.ndarray, tuple[int, int, int, int]] | None:
+    """Lower vehicle region including extra pixels below the YOLO box."""
+    crop = bumper_crop(bgr, box)
+    if crop is None or not box:
+        return None
+    h, w = bgr.shape[:2]
+    x, y, bw, bh = [int(v) for v in box[:4]]
+    pad_x = max(2, int(0.20 * bw))
+    extra_below = max(4, int(0.45 * bh))
+    x0 = max(0, x - pad_x)
+    y0 = max(0, y + int(0.45 * bh))
+    return crop, (x0, y0, min(w, x + bw + pad_x) - x0, min(h, y + bh + extra_below) - y0)
 
 
 def enhancement_status() -> dict:
@@ -434,6 +449,7 @@ def anpr_crops(bgr: np.ndarray, *, live: bool) -> list[dict]:
         out = []
         for d in ranked[: max(1, int(settings.yolo_max_crops or 2))]:
             box = (d.x1, d.y1, d.x2 - d.x1, d.y2 - d.y1)
+            crop_box = d.crop_box if any(d.crop_box) else box
             focuses = plate_focus_crops(bgr, box)
             plate = focuses[0] if focuses else bumper_crop(bgr, box)
             out.append(
@@ -442,6 +458,7 @@ def anpr_crops(bgr: np.ndarray, *, live: bool) -> list[dict]:
                     "body_crop": d.crop,
                     "plate_crops": focuses,
                     "box": box,
+                    "crop_box": crop_box,
                     "vehicle_type": d.vehicle_type,
                     "detector": "yolov8n",
                     "det_conf": d.confidence,

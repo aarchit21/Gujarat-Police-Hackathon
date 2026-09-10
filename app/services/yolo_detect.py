@@ -37,6 +37,7 @@ class VehicleDet:
     confidence: float
     vehicle_type: str
     crop: np.ndarray
+    crop_box: tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
 def _weights_path() -> Path:
@@ -117,25 +118,35 @@ def _load_model():
     return _model
 
 
-def _crop(bgr: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> np.ndarray:
-    h, w = bgr.shape[:2]
-    bw = max(1.0, x2 - x1)
-    bh = max(1.0, y2 - y1)
-    pad_x = 0.12 * bw
-    pad_y = 0.10 * bh
+def expand_vehicle_box(
+    frame_shape: tuple[int, ...],
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> tuple[int, int, int, int]:
+    """Pad the YOLO box so bumper plates are not clipped. Native pixels only."""
+    h, w = int(frame_shape[0]), int(frame_shape[1])
+    bw = max(1.0, float(x2) - float(x1))
+    bh = max(1.0, float(y2) - float(y1))
+    pad_x = float(getattr(settings, "vehicle_crop_pad_x", 0.20) or 0.20) * bw
+    pad_top = float(getattr(settings, "vehicle_crop_pad_top", 0.15) or 0.15) * bh
+    pad_bottom = float(getattr(settings, "vehicle_crop_pad_bottom", 0.45) or 0.45) * bh
     xa = max(0, int(x1 - pad_x))
-    ya = max(0, int(y1 - pad_y))
+    ya = max(0, int(y1 - pad_top))
     xb = min(w, int(x2 + pad_x))
-    yb = min(h, int(y2 + pad_y + 0.25 * bh))
+    yb = min(h, int(y2 + pad_bottom))
+    if xb <= xa or yb <= ya:
+        return max(0, int(x1)), max(0, int(y1)), min(w, int(x2)), min(h, int(y2))
+    return xa, ya, xb, yb
+
+
+def _crop(bgr: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    xa, ya, xb, yb = expand_vehicle_box(bgr.shape, x1, y1, x2, y2)
     crop = bgr[ya:yb, xa:xb]
     if crop.size == 0:
-        return bgr
-    if crop.shape[1] < 320:
-        import cv2
-
-        scale = 320.0 / max(crop.shape[1], 1)
-        crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)))
-    return crop
+        return bgr, (0, 0, int(bgr.shape[1]), int(bgr.shape[0]))
+    return crop, (xa, ya, xb - xa, yb - ya)
 
 
 def detect_vehicles(bgr: np.ndarray, *, predict_fn=None, max_detections: int | None = None) -> list[VehicleDet]:
@@ -187,6 +198,7 @@ def detect_vehicles(bgr: np.ndarray, *, predict_fn=None, max_detections: int | N
             continue
         x1, y1, x2, y2 = [float(v) for v in row[:4]]
         score = float(conf_arr[i]) if i < len(conf_arr) else 0.0
+        crop, crop_box = _crop(bgr, x1, y1, x2, y2)
         dets.append(
             VehicleDet(
                 x1=int(x1),
@@ -195,7 +207,8 @@ def detect_vehicles(bgr: np.ndarray, *, predict_fn=None, max_detections: int | N
                 y2=int(y2),
                 confidence=score,
                 vehicle_type=VEHICLE_TYPE_BY_ID.get(class_id, "car"),
-                crop=_crop(bgr, x1, y1, x2, y2),
+                crop=crop,
+                crop_box=crop_box,
             )
         )
     dets.sort(key=lambda d: (-(d.x2 - d.x1) * (d.y2 - d.y1), -d.confidence))

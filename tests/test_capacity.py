@@ -145,10 +145,42 @@ def test_measure_retries_failed_preferring_known_size(db):
         seen.append(url.split("@")[-1] if "@" in url else url)
         return {"ok": True, "frame": True, "width": 1920, "height": 1080, "pts_ms": 10, "error": ""}
 
-    out = measure_government_decode(db, limit=1, probe_fn=probe)
+    out = measure_government_decode(db, limit=1, probe_fn=probe, retest_failed=True)
     assert seen == ["x/cam01"]
     assert out["decode_ok"] == ["cam01"]
     assert out["catalogue_remaining_untested"] == 0
+
+
+def test_measure_does_not_retest_failed_when_none_untested(db):
+    add_camera(
+        db,
+        id="cam01",
+        source_type="rtsp",
+        source_uri="rtsp://x/cam01",
+        catalogue_camera_id="cam01",
+        processing_mode="local_worker",
+        decode_status="ok",
+    )
+    add_camera(
+        db,
+        id="cam08",
+        source_type="rtsp",
+        source_uri="rtsp://x/cam08",
+        catalogue_camera_id="cam08",
+        processing_mode="local_worker",
+        decode_status="failed",
+    )
+    seen = []
+
+    def probe(url, timeout=6.0):
+        seen.append(url)
+        raise AssertionError("failed cameras must not be probed by default")
+
+    out = measure_government_decode(db, limit=4, probe_fn=probe)
+    assert seen == []
+    assert out["tested_count"] == 0
+    assert out["catalogue_remaining_failed"] == 1
+    assert "cam01" in (out.get("already_decode_ok") or [])
 
 
 def test_start_accessible_promotes_deferred_decode_ok(db):

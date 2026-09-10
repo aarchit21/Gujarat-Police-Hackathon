@@ -20,6 +20,7 @@ from app.security import evidence_relpath_is_safe, redact_url
 from app.services.activity import cameras_active_at
 from app.services.anpr import enhancement_status
 from app.services.lpdgan import lpdgan_status
+from app.services.lpdnet import lpdnet_status
 from app.services.cpu_anpr import cpu_anpr_status
 from app.services.cloud_verifier_queue import cloud_verifier
 from app.services.recognition_diagnostics import diagnostics_snapshot, serialize_attempt
@@ -57,7 +58,7 @@ from app.services.recognition_policy import (
 )
 from app.services.vendor import VendorIngestError, ingest_vendor_event
 from app.services.hunt import hunt_status, start_hunt, stop_hunt
-from app.services.workers import manager
+from app.services.workers import hydrate_concurrency, manager
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -69,6 +70,7 @@ async def lifespan(_app: FastAPI):
     try:
         backfill_catalogue_display(db)
         hydrate_recognition_policy(db)
+        hydrate_concurrency(db)
         db.commit()
         autostart_if_configured(manager, db)
     finally:
@@ -178,6 +180,7 @@ def health(db: Session = Depends(get_db)):
         "ollama_vision": vision_status(),
         "vision_enhancement": enhancement_status(),
         "lpdgan": lpdgan_status(),
+        "lpdnet": lpdnet_status(),
         "vision_only": {
             "active": bool(getattr(manager, "vision_only", False)),
             "models": [m.strip() for m in (settings.vision_only_models or "").split(",") if m.strip()],
@@ -674,6 +677,7 @@ class HuntStartIn(BaseModel):
     pinned_only: bool = False
     pin_ids: list[str] | None = None
     vision_only: bool = False
+    max_concurrent: int | None = Field(default=None, ge=1, le=30)
 
 
 @app.post("/api/hunt/start")
@@ -690,23 +694,25 @@ def api_hunt_start(
         pinned_only=payload.pinned_only,
         pin_ids=payload.pin_ids,
         vision_only=payload.vision_only,
+        max_concurrent=payload.max_concurrent,
     )
 
 
 @app.post("/api/hunt/pin")
 def api_hunt_pin(
+    body: HuntStartIn | None = None,
     db: Session = Depends(get_db),
     actor: str = Depends(require_operator),
 ):
-    return start_hunt(manager, db, actor=actor, pinned_only=True)
-
-
-@app.post("/api/hunt/vision-only")
-def api_hunt_vision_only(
-    db: Session = Depends(get_db),
-    actor: str = Depends(require_operator),
-):
-    return start_hunt(manager, db, actor=actor, pinned_only=True, vision_only=True)
+    payload = body or HuntStartIn()
+    return start_hunt(
+        manager,
+        db,
+        actor=actor,
+        pinned_only=True,
+        pin_ids=payload.pin_ids,
+        max_concurrent=payload.max_concurrent,
+    )
 
 
 @app.post("/api/hunt/stop")
@@ -717,14 +723,21 @@ def api_hunt_stop(
     return stop_hunt(manager, db, actor=actor)
 
 
+class MeasureIn(BaseModel):
+    retest_failed: bool = False
+    limit: int | None = Field(default=None, ge=1, le=8)
+
+
 @app.post("/api/capacity/measure")
 def api_capacity_measure(
+    body: MeasureIn | None = None,
     db: Session = Depends(get_db),
     actor: str = Depends(require_operator),
 ):
+    payload = body or MeasureIn()
     db.add(AuditEvent(actor=actor, action="capacity_measure_request", detail="sequential government decode probe"))
     db.commit()
-    return measure_government_decode(db)
+    return measure_government_decode(db, limit=payload.limit, retest_failed=payload.retest_failed)
 
 
 @app.get("/api/capacity")

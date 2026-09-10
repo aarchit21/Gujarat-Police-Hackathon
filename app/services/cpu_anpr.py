@@ -181,7 +181,7 @@ def localization_gate(candidate: CpuPlateCandidate) -> bool:
     aspect = width / max(height, 1)
     if aspect < 1.2 or aspect > 8.0:
         return False
-    if candidate.detector != "fast_alpr":
+    if candidate.detector not in {"fast_alpr", "lpdnet"}:
         return False
     return float(candidate.detector_confidence or 0.0) >= float(settings.cpu_anpr_min_detector_confidence)
 
@@ -247,6 +247,13 @@ def cpu_anpr_status() -> dict:
         (configured_tesseract and configured_tesseract.is_file()) or shutil.which("tesseract")
     )
     chosen = _loaded_providers or onnx_execution_providers()
+    lpd = {}
+    try:
+        from app.services.lpdnet import lpdnet_status
+
+        lpd = lpdnet_status()
+    except Exception:
+        lpd = {}
     return {
         "enabled": bool(settings.cpu_anpr_enabled),
         "models_ready": bool(settings.cpu_anpr_models_ready),
@@ -262,6 +269,7 @@ def cpu_anpr_status() -> dict:
         "ocr_model": settings.cpu_anpr_ocr_model,
         "model_hash": _model_hash(),
         "error": _load_error or err,
+        "lpdnet": lpd,
     }
 
 
@@ -530,6 +538,75 @@ def opencv_tesseract_candidates(bgr: np.ndarray) -> list[CpuPlateCandidate]:
     return out
 
 
+def _union_candidates(
+    primary: list[CpuPlateCandidate],
+    extra: list[CpuPlateCandidate],
+) -> list[CpuPlateCandidate]:
+    out = list(primary)
+    for cand in extra:
+        if cand.box and any(_boxes_overlap(cand.box, prior.box) for prior in out if prior.box):
+            continue
+        out.append(cand)
+    return out
+
+
+def _boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
+    if not ix or not iy:
+        return False
+    return (ix * iy) / max(1, min(aw * ah, bw * bh)) >= 0.5
+
+
+def _lpdnet_candidates(bgr: np.ndarray) -> list[CpuPlateCandidate]:
+    from app.services.lpdnet import detect_plates, lpdnet_ready
+
+    if not lpdnet_ready():
+        return []
+    boxes = detect_plates(bgr)
+    if not boxes:
+        return []
+    runner = _load_alpr()
+    started = time.perf_counter()
+    out: list[CpuPlateCandidate] = []
+    height, width = bgr.shape[:2]
+    for x, y, w, h, det_conf in boxes:
+        x, y = max(0, int(x)), max(0, int(y))
+        crop = bgr[y : min(height, y + int(h)), x : min(width, x + int(w))].copy()
+        if crop.size == 0:
+            continue
+        raw, confs, conf = "", [], float(det_conf)
+        recognizer = "fast_plate_ocr_enhanced"
+        if runner is not None and getattr(runner, "ocr", None) is not None:
+            enhanced = _ocr_enhanced_crop(runner, crop)
+            native = None
+            try:
+                native = _ocr_text_conf(runner.ocr.predict(crop))
+            except Exception:
+                native = None
+            if enhanced is not None and (native is None or _prefer_enhanced_ocr(native[0], native[2], enhanced[0], enhanced[2])):
+                raw, confs, conf = enhanced
+            elif native is not None:
+                raw, confs, conf = native
+                recognizer = "fast_plate_ocr"
+        norm = normalize(raw)
+        quality = asdict(plate_quality(crop))
+        quality.update({"aspect_ratio": round(float(w) / max(float(h), 1.0), 3), "detector_confidence": round(float(det_conf), 4)})
+        out.append(CpuPlateCandidate(
+            plate_raw=raw, plate_norm=norm, confidence=max(0.0, min(1.0, conf)),
+            character_confidences=confs, crop_bgr=crop, box=(x, y, int(w), int(h)),
+            detector="lpdnet", recognizer=recognizer,
+            model_id="lpdnet-usa+fast_plate_ocr", model_hash=_model_hash(),
+            quality=quality,
+            reason="candidate" if syntax_ok(norm) else (quality.get("reason") or ("syntax_invalid" if norm else "ocr_empty")),
+            latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
+            raw_output=raw, detector_confidence=float(det_conf),
+        ))
+    return out
+
+
 def cpu_plate_candidates(
     bgr: np.ndarray,
     *,
@@ -540,6 +617,8 @@ def cpu_plate_candidates(
         return []
     with _inference_slots:
         fast = detect_with_fast_alpr(bgr, predictor=predictor)
+        extra = [] if predictor is not None else _lpdnet_candidates(bgr)
+        fast = _union_candidates(fast, extra)
         if fast:
             if settings.cpu_anpr_secondary_tesseract:
                 for candidate in fast:

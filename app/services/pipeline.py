@@ -471,7 +471,7 @@ class FrameProcessor:
         now = _time_mod.monotonic()
         if (
             self.reader is None and live and not recordable and crop is not None
-            and result.get("detector") == "fast_alpr"
+            and result.get("detector") in {"fast_alpr", "lpdnet"}
             and bool(result.get("localization_accepted"))
             and now - self._last_cloud_queue >= float(settings.ollama_live_interval_seconds)
         ):
@@ -515,7 +515,7 @@ class FrameProcessor:
             quality = {**quality, "context_evidence_path": context_evidence}
             result["quality"] = quality
         localized_plate = bool(
-            result.get("detector") == "fast_alpr" and result.get("localization_accepted")
+            result.get("detector") in {"fast_alpr", "lpdnet"} and result.get("localization_accepted")
         )
         # In live diagnostics, evidence_path is reserved for a detector-backed
         # native plate crop. YOLO-only regions are context, not plate evidence.
@@ -789,7 +789,7 @@ def _read_plate(
             if item.get("detector") != "yolov8n":
                 continue
             vehicle = item.get("body_crop")
-            vehicle_box = item.get("box")
+            vehicle_box = item.get("crop_box") or item.get("box")
             if vehicle is None or not getattr(vehicle, "size", 0) or not vehicle_box:
                 continue
             ox, oy = int(vehicle_box[0]), int(vehicle_box[1])
@@ -798,6 +798,21 @@ def _read_plate(
                     x, y, bw, bh = candidate.box
                     candidate.box = (x + ox, y + oy, bw, bh)
                 cpu_candidates.append(candidate)
+            bumper = None
+            try:
+                from app.services.anpr import bumper_roi
+
+                bumper = bumper_roi(bgr, item.get("box"))
+            except Exception:
+                bumper = None
+            if bumper is not None:
+                bumper_crop, bumper_box = bumper
+                bx, by = int(bumper_box[0]), int(bumper_box[1])
+                for candidate in cpu_plate_candidates(bumper_crop, allow_opencv_fallback=False):
+                    if candidate.box:
+                        x, y, bw, bh = candidate.box
+                        candidate.box = (x + bx, y + by, bw, bh)
+                    cpu_candidates.append(candidate)
         # A full-frame and vehicle-region inference may produce the same plate.
         unique: list[Any] = []
         for candidate in cpu_candidates:
@@ -829,7 +844,7 @@ def _read_plate(
                 "latency_ms": best_cpu.latency_ms,
                 "raw_output": best_cpu.raw_output,
                 "reader_agreement": best_cpu.reader_agreement,
-                "localization_accepted": localization_gate(best_cpu) if live else best_cpu.detector == "fast_alpr",
+                "localization_accepted": localization_gate(best_cpu) if live else best_cpu.detector in {"fast_alpr", "lpdnet"},
             }
         )
         return out
@@ -986,7 +1001,7 @@ def _read_plate(
                 "unreadable_reason": (
                     "no_plate_localized" if live and not localization_gate(best_cpu) else best_cpu.reason
                 ),
-                "localization_accepted": localization_gate(best_cpu) if live else best_cpu.detector == "fast_alpr",
+                "localization_accepted": localization_gate(best_cpu) if live else best_cpu.detector in {"fast_alpr", "lpdnet"},
             })
             return out
         camera.last_error = "yolo+ollama: no vehicle crop large enough for a plate"

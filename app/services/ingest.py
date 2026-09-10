@@ -283,7 +283,7 @@ class SourceOpenError(RuntimeError):
 
 class CaptureRegistry:
     def __init__(self, max_open: int | None = None):
-        self.max_open = int(max_open or settings.max_open_captures)
+        self.max_open = int(max_open or settings.max_open_captures or 1)
         self._owners: dict[str, str] = {}
 
     def count(self) -> int:

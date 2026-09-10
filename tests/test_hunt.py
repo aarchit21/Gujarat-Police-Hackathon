@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 
 from app.config import settings
 from app.models import Alert, RecognitionAttempt, Sighting
-from app.services.hunt import hunt_targets, PIN_DEFAULT
+from app.services.hunt import decode_ok_pin_ids, hunt_targets, PIN_DEFAULT, slot_count
 from app.services.ingest import OpenedSource
 from app.services.pipeline import process_frame_iter
 from app.services.workers import WorkerManager, run_live_loop
@@ -41,6 +41,37 @@ def test_hunt_targets_decode_ok_first(db):
     assert set(PIN_DEFAULT) >= {"cam01", "cam02", "cam03", "cam05"}
 
 
+def test_pin_fills_operator_chosen_slots(db, monkeypatch):
+    monkeypatch.setattr(settings, "max_open_captures", 4)
+    monkeypatch.setattr(settings, "max_concurrent_workers", 4)
+    assert slot_count() == 4
+    for i in range(1, 16):
+        add_camera(
+            db,
+            id=f"cam{i:02d}",
+            source_type="rtsp",
+            source_uri="rtsp://x",
+            catalogue_live=True,
+            catalogue_camera_id=f"cam{i:02d}",
+            decode_status="ok" if i <= 14 else "failed",
+        )
+    assert len(decode_ok_pin_ids(db)) == 4
+    pinned = decode_ok_pin_ids(db, n=12)
+    assert len(pinned) == 12
+    assert all(cid in {f"cam{i:02d}" for i in range(1, 15)} for cid in pinned)
+
+
+def test_set_concurrency_is_operator_chosen_not_locked_to_thirty():
+    from app.services.workers import WorkerManager
+
+    mgr = WorkerManager(max_workers=4)
+    assert mgr.set_concurrency(8) == 8
+    assert mgr.max_workers == 8
+    assert mgr.registry.max_open == 8
+    assert mgr.set_concurrency(4) == 4
+    assert mgr.max_workers == 4
+
+
 def test_hunt_session_does_not_reconnect(db):
     cam = add_camera(db, id="cam01", source_type="rtsp", source_uri="rtsp://x", catalogue_live=True)
     opens = {"n": 0}
@@ -66,6 +97,36 @@ def test_hunt_session_does_not_reconnect(db):
     )
     assert opens["n"] == 1
     assert cam.analytics_active is False
+
+
+def test_pin_holds_without_hunt_rotation(db):
+    for i in range(1, 5):
+        add_camera(
+            db,
+            id=f"cam{i:02d}",
+            source_type="rtsp",
+            source_uri="rtsp://x",
+            catalogue_live=True,
+            catalogue_camera_id=f"cam{i:02d}",
+            decode_status="ok",
+            processing_mode="local_worker",
+        )
+    mgr = WorkerManager(max_workers=4)
+    started = []
+
+    def fake_start(_db, camera_id, actor="operator"):
+        started.append(camera_id)
+        return {"ok": True, "state": "starting"}
+
+    mgr.start = fake_start  # type: ignore[method-assign]
+    from app.services.hunt import start_hunt
+
+    out = start_hunt(mgr, db, pinned_only=True, max_concurrent=4)
+    assert mgr.hunt_enabled is False
+    assert mgr.pin_hold_ids == {"cam01", "cam02", "cam03", "cam04"}
+    assert set(started) == mgr.pin_hold_ids
+    assert out["pinned_only"] is True
+    assert "do not rotate" in (out.get("disclaimer") or "").lower() or "held" in (out.get("disclaimer") or "").lower()
 
 
 def test_hunt_requeue_completes_a_cycle():

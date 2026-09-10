@@ -280,3 +280,84 @@ def test_catalogue_form_auth_rejects_cross_origin_login(monkeypatch):
             assert "same origin" in str(exc)
         else:
             raise AssertionError("cross-origin credential POST was not rejected")
+
+
+def test_named_catalogue_camera_is_not_placed_in_the_gulf(db):
+    from app.services.places import in_known_water
+
+    item = {"catalogue_camera_id": "cam05", "name": "05 Visat teen Rasta"}
+    cam = upsert_from_catalogue(db, item)
+    db.commit()
+    assert cam.coords_source == "inferred_place"
+    assert cam.city == "Ahmedabad"
+    assert abs(cam.lat - 23.0754) < 0.08
+    assert abs(cam.lng - 72.5878) < 0.08
+    assert not in_known_water(cam.lat, cam.lng)
+
+
+def test_junagadh_cameras_cluster_on_land_and_do_not_stack(db):
+    from app.services.places import in_known_water
+
+    a = upsert_from_catalogue(db, {"catalogue_camera_id": "cam06", "name": "06 Timbavadi gate-Junagadh"})
+    b = upsert_from_catalogue(db, {"catalogue_camera_id": "cam08", "name": "08 majewadi-gate-junagadh"})
+    db.commit()
+    assert a.city == "Junagadh" and b.city == "Junagadh"
+    assert (a.lat, a.lng) != (b.lat, b.lng)
+    assert abs(a.lat - 21.5222) < 0.08 and abs(b.lat - 21.5222) < 0.08
+    assert not in_known_water(a.lat, a.lng)
+    assert not in_known_water(b.lat, b.lng)
+
+
+def test_catalogue_latlng_wins_over_name(db):
+    cam = upsert_from_catalogue(
+        db,
+        {"catalogue_camera_id": "cam04", "name": "04 Paldi Circle", "lat": 23.0, "lng": 72.5, "location": "Paldi"},
+    )
+    db.commit()
+    assert cam.coords_source == "catalogue"
+    assert cam.lat == 23.0 and cam.lng == 72.5
+    assert cam.city == "Paldi"
+
+
+def test_own_feed_coords_survive_name_inference(db):
+    add_camera(
+        db,
+        id="cam01",
+        name="01 Chiman bhai Bridge",
+        catalogue_camera_id="cam01",
+        lat=23.0225,
+        lng=72.5714,
+        coords_source="own_feed",
+        city="Ahmedabad",
+    )
+    upsert_from_catalogue(db, {"catalogue_camera_id": "cam01", "name": "01 Chiman bhai Bridge"})
+    db.commit()
+    cam = db.get(Camera, "cam01")
+    assert cam.coords_source == "own_feed"
+    assert cam.lat == 23.0225
+    assert cam.lng == 72.5714
+
+
+def test_backfill_moves_gulf_placeholder_to_named_city(db):
+    from app.services.catalogue import backfill_catalogue_display
+    from app.services.places import in_known_water
+
+    add_camera(
+        db,
+        id="cam12",
+        name="12 Tri Mandir Adalaj Tollnaka",
+        catalogue_camera_id="cam12",
+        lat=22.448,
+        lng=69.772,
+        coords_source="placeholder",
+        city="",
+        catalogue_live=True,
+    )
+    backfill_catalogue_display(db)
+    db.commit()
+    cam = db.get(Camera, "cam12")
+    assert cam.coords_source == "inferred_place"
+    assert cam.city == "Adalaj"
+    assert abs(cam.lat - 23.1645) < 0.08
+    assert abs(cam.lng - 72.5810) < 0.08
+    assert not in_known_water(cam.lat, cam.lng)

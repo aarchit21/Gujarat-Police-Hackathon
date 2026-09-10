@@ -1,7 +1,7 @@
-"""Optional Ollama vision OCR (local GPU or Ollama Cloud).
+"""Ollama Cloud vision OCR (gemma4:31b). Local Ollama is not used.
 
-Local: OLLAMA_URL=http://127.0.0.1:11434 (no API key).
-Cloud: https://ollama.com (requires OLLAMA_API_KEY).
+Cloud: OLLAMA_URL=https://ollama.com (requires OLLAMA_API_KEY).
+Local qwen3-vl is not a fallback — leftover 127.0.0.1 URLs are rewritten to cloud.
 
 Never put watchlist plates in the prompt. Never log the API key.
 model_id is ollama:<actual-model> only when that model is called.
@@ -26,21 +26,12 @@ from app.services.plates import normalize
 from app.services.vehicle_event import VEHICLE_PROMPT, parse_vehicle_payload
 
 VISION_CANDIDATES = (
-    "qwen3-vl:8b",
-    "qwen3-vl:4b",
-    "qwen3-vl",
-    "qwen2.5vl:7b",
-    "qwen2.5vl:3b",
-    "llava:7b",
-    "llava:7b-v1.6",
-    "llava:latest",
-    "gemma4:e4b",
-    "gemma4:e2b",
+    "gemma4:31b",
     "gemma4",
-    "qwen3.5:4b",
-    "gemma3:4b",
-    "gemma3:12b",
-    "moondream:1.8b",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "glm-5.1",
 )
 # gemma3:4b was retired from Ollama Cloud on 2026-07-15 (HTTP 410).
 # This account's /api/tags lists gemma4:31b as the available vision cloud model.
@@ -96,7 +87,7 @@ def normalize_ollama_base(url: str | None = None) -> str:
     raw = (url or settings.ollama_url or "").strip().rstrip("/")
     if raw.endswith("/api"):
         raw = raw[:-4]
-    return raw or "http://127.0.0.1:11434"
+    return raw or "https://ollama.com"
 
 
 def _host(url: str) -> str:
@@ -112,16 +103,16 @@ def is_local_url(url: str | None = None) -> bool:
 
 
 def effective_ollama_url() -> str:
-    """Cloud only when OLLAMA_URL is ollama.com. A local URL is never rewritten."""
+    """Always Ollama Cloud. Local 11434 leftovers are rewritten; other hosts stay rejected."""
     base = normalize_ollama_base()
-    if is_cloud_url(base):
+    if is_cloud_url(base) or is_local_url(base) or not base:
         return "https://ollama.com"
     return base
 
 
 def ollama_host_allowed(url: str | None = None) -> bool:
     host = _host(url or effective_ollama_url())
-    return host in LOCAL_HOSTS or host in CLOUD_HOSTS
+    return host in CLOUD_HOSTS
 
 
 def auth_headers() -> dict[str, str]:
@@ -134,7 +125,7 @@ def auth_headers() -> dict[str, str]:
 def list_ollama_models(client: httpx.Client | None = None) -> list[str]:
     base = effective_ollama_url()
     if not ollama_host_allowed(base):
-        raise OllamaVisionError("OLLAMA_URL host is not local or ollama.com")
+        raise OllamaVisionError("OLLAMA_URL host is not ollama.com")
     if is_cloud_url(base) and not (settings.ollama_api_key or "").strip():
         raise OllamaVisionError("OLLAMA_API_KEY is required for Ollama Cloud")
     own = client is None
@@ -370,7 +361,7 @@ def infer_bgr(
         raise OllamaVisionError(_cloud_disabled_reason)
     base = effective_ollama_url()
     if not ollama_host_allowed(base):
-        raise OllamaVisionError("OLLAMA_URL host is not local or ollama.com")
+        raise OllamaVisionError("OLLAMA_URL host is not ollama.com")
     if is_cloud_url(base) and not (settings.ollama_api_key or "").strip():
         raise OllamaVisionError("OLLAMA_API_KEY is required for Ollama Cloud")
     chosen = model or resolve_vision_model()
@@ -417,13 +408,15 @@ def infer_bgr(
 
 
 def vision_only_model_list() -> list[str]:
-    raw = (getattr(settings, "vision_only_models", None) or "qwen3-vl:8b")
+    raw = (getattr(settings, "vision_only_models", None) or CLOUD_DEFAULT_MODEL)
     out: list[str] = []
     for part in str(raw).split(","):
         name = part.strip()
+        if any(name.startswith(prefix) for prefix in RETIRED_CLOUD_PREFIXES):
+            name = CLOUD_DEFAULT_MODEL
         if name and name not in out:
             out.append(name)
-    return out or ["qwen3-vl:8b"]
+    return out or [CLOUD_DEFAULT_MODEL]
 
 
 def infer_named_vision(
@@ -447,7 +440,7 @@ def infer_named_vision(
             return {"plate_norm": "", "skipped": "cloud_disabled", "model_id": f"ollama:{name}"}
         base = effective_ollama_url()
         if not ollama_host_allowed(base):
-            raise OllamaVisionError("OLLAMA_URL host is not local or ollama.com")
+            raise OllamaVisionError("OLLAMA_URL host is not ollama.com")
         if is_cloud_url(base) and not (settings.ollama_api_key or "").strip():
             raise OllamaVisionError("OLLAMA_API_KEY is required for Ollama Cloud")
         if isinstance(bgr, list):
@@ -569,7 +562,7 @@ def infer_vehicle(
             raise OllamaVisionError(_cloud_disabled_reason)
         base = effective_ollama_url()
         if not ollama_host_allowed(base):
-            raise OllamaVisionError("OLLAMA_URL host is not local or ollama.com")
+            raise OllamaVisionError("OLLAMA_URL host is not ollama.com")
         if is_cloud_url(base) and not (settings.ollama_api_key or "").strip():
             raise OllamaVisionError("OLLAMA_API_KEY is required for Ollama Cloud")
         chosen = model or (settings.vehicle_attribute_model if attributes_only else resolve_vision_model())

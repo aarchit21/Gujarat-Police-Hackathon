@@ -18,7 +18,7 @@
   <div class="banner" id="coverageBanner">Coverage loading…</div>
   <div class="stats" id="statsBar"></div>
   <div class="demo" id="demoStrip">Demo: workers idle · last sighting —</div>
-  <div class="hunt" id="huntStrip">Hunt idle — this host can run 4 live streams at a time, not 30 at once.</div>
+  <div class="hunt" id="huntStrip">Hunt idle — set max concurrent cameras, then pin working cameras or hunt all live feeds.</div>
   <div class="layout">
     <div class="map-wrap">
       <div id="map"></div>
@@ -34,9 +34,11 @@
     </div>
     <aside>
       <div class="row">
-        <button id="btnHuntVision">Vision-only A/B (pinned 4)</button>
-        <button id="btnHuntPin">Pin 4 working cameras</button>
-        <button id="btnHuntStart">Hunt all 30 live feeds</button>
+        <label class="muted">Max concurrent cameras
+          <input class="js-max-concurrent" id="maxConcurrent" type="number" min="1" max="30" value="4" />
+        </label>
+        <button id="btnHuntPin">Pin working cameras</button>
+        <button id="btnHuntStart">Hunt all live feeds</button>
         <button class="secondary" id="btnHuntStop">Stop hunt</button>
         <button class="secondary" id="btnAnalyze">Run own-feed analysis</button>
         <button class="secondary" id="btnRefresh">Refresh</button>
@@ -159,10 +161,13 @@
 
       <section data-panel="workers" class="hidden">
         <h2>Worker manager</h2>
-        <p class="legend">Hunt all 30 is the demo path: 4 concurrent streams rotate so every live camera is visited. Decode = this laptop opened RTSP and got a frame, not a plate. Measure tests the next 4 untested cameras. Do not run uvicorn with --reload while workers are running.</p>
+        <p class="legend">Max concurrent cameras is how many live RTSP workers this host holds at once (default 4). Pin working cameras holds that many decode-ok feeds open (no 28s rotation). Hunt all live feeds rotates those slots. Measure probes the next 4 untested feeds only (~6s each) — it does not re-wait on already-failed RTSP. Decode = this host opened RTSP and got a frame, not a plate.</p>
         <div class="row">
-          <button id="btnHuntPin2">Pin 4 working cameras</button>
-          <button id="btnHuntStart2">Hunt all 30</button>
+          <label class="muted">Max concurrent cameras
+            <input class="js-max-concurrent" type="number" min="1" max="30" value="4" />
+          </label>
+          <button id="btnHuntPin2">Pin working cameras</button>
+          <button id="btnHuntStart2">Hunt all live feeds</button>
           <button class="secondary" id="btnHuntStop2">Stop hunt</button>
         </div>
         <div id="capacityPanel" class="card muted">No capacity measurement yet.</div>
