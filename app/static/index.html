@@ -3,327 +3,464 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Gujarat CCTV Operations Console</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;700&display=swap" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="/static/styles.css?v=20260913-console-1" />
+  <title>Vehicle Investigation Console — Gujarat Police</title>
+  <meta name="description" content="Vehicle observation search, camera status and watchlist alerts." />
+  <!-- Everything this console needs is served from this host. No font CDN, no
+       analytics, no external scripts: it has to work at a venue with no
+       internet. Leaflet and hls.js are vendored under /static/vendor/. The one
+       remote asset is the OpenStreetMap basemap, and the map says so when the
+       tiles cannot be reached. -->
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css?v=20260914-prod-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260914-prod-1" />
 </head>
 <body>
-<div class="shell">
 
-  <!-- ===================== LEFT RAIL ===================== -->
-  <nav class="rail">
-    <div class="brand">
-      <div class="brand-mark">GP</div>
+<!-- ======================= SIGN IN ======================= -->
+<div class="signin" id="signIn">
+  <form class="signin-card" id="signInForm" autocomplete="off">
+    <div class="signin-brand">
+      <span class="brand-mark" aria-hidden="true">GP</span>
       <div>
-        <div class="brand-name">Gujarat Police</div>
-        <div class="brand-sub">CCTV Hybrid</div>
+        <h1>Vehicle Investigation Console</h1>
+        <p>Gujarat Police · CCTV analytics</p>
+      </div>
+    </div>
+    <label for="operatorToken">Operator access token</label>
+    <input id="operatorToken" name="operatorToken" type="password" required
+           autocomplete="current-password" aria-describedby="signInHelp signInError" />
+    <p class="help" id="signInHelp">Issued to authorised investigators. Actions you take are recorded against this token.</p>
+    <p class="field-error hidden" id="signInError" role="alert"></p>
+    <button type="submit" id="signInButton">Sign in</button>
+    <p class="signin-foot">
+      Authorised use only. This console shows vehicle observations and watchlist
+      matches. It is not a video archive and does not confirm vehicle identity.
+    </p>
+  </form>
+</div>
+
+<!-- ======================= APP ======================= -->
+<div class="app hidden" id="app">
+
+  <nav class="rail" aria-label="Sections">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">GP</span>
+      <span>
+        <span class="brand-name">Gujarat Police</span>
+        <span class="brand-sub">Investigation console</span>
+      </span>
+    </div>
+
+    <div class="navgroup">
+      <h2 class="navlabel" id="nav-investigate">Investigate</h2>
+      <div role="tablist" aria-labelledby="nav-investigate">
+        <button class="navitem is-current" data-page="overview" role="tab" aria-selected="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3.5" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="3.5" width="7.5" height="7.5" rx="1.6"/><rect x="3" y="13" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="13" width="7.5" height="7.5" rx="1.6"/></svg>
+          <span>Overview</span>
+        </button>
+        <button class="navitem" data-page="search" role="tab" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8"/></svg>
+          <span>Vehicle search</span>
+        </button>
+        <button class="navitem" data-page="movement" role="tab" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-5.2 7-10.6A7 7 0 0 0 5 10.4C5 15.8 12 21 12 21Z"/><circle cx="12" cy="10.3" r="2.6"/></svg>
+          <span>Vehicle movement</span>
+        </button>
       </div>
     </div>
 
     <div class="navgroup">
-      <div class="navlabel">Operations</div>
-      <button class="tab navitem on" data-tab="investigate">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8"/></svg>
-        <span>Investigation</span>
-      </button>
-      <button class="tab navitem" data-tab="vehicles">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 16.5h2l1.6-4.4A2 2 0 0 1 8.5 10.8h7a2 2 0 0 1 1.9 1.3l1.6 4.4h2"/><path d="M4 16.5V19h3v-2.5"/><path d="M17 16.5V19h3v-2.5"/></svg>
-        <span>Live vehicles</span>
-      </button>
-      <button class="tab navitem" data-tab="monitor">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-5.2 7-10.6A7 7 0 0 0 5 10.4C5 15.8 12 21 12 21Z"/><circle cx="12" cy="10.3" r="2.6"/></svg>
-        <span>Plate map</span>
-      </button>
+      <h2 class="navlabel" id="nav-enforce">Enforcement</h2>
+      <div role="tablist" aria-labelledby="nav-enforce">
+        <button class="navitem" data-page="alerts" role="tab" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.6 2.8 17a1.8 1.8 0 0 0 1.6 2.7h15.2A1.8 1.8 0 0 0 21.2 17L13.7 3.6a1.8 1.8 0 0 0-3.4 0Z"/><path d="M12 9.4v4"/></svg>
+          <span>Alerts</span>
+          <span class="nav-count hidden" id="navAlertCount" aria-hidden="true"></span>
+        </button>
+        <button class="navitem" data-page="watchlist" role="tab" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 5 6v5.4c0 4.3 2.9 8 7 9.4 4.1-1.4 7-5.1 7-9.4V6Z"/><path d="m9.4 12 1.9 1.9 3.6-3.7"/></svg>
+          <span>Watchlist</span>
+        </button>
+      </div>
     </div>
 
     <div class="navgroup">
-      <div class="navlabel">Enforcement</div>
-      <button class="tab navitem" data-tab="alerts">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.6 2.8 17a1.8 1.8 0 0 0 1.6 2.7h15.2A1.8 1.8 0 0 0 21.2 17L13.7 3.6a1.8 1.8 0 0 0-3.4 0Z"/><path d="M12 9.4v4"/></svg>
-        <span>Plate tools</span>
-      </button>
-      <button class="tab navitem" data-tab="watchlist">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2 5 6v5.4c0 4.3 2.9 8 7 9.4 4.1-1.4 7-5.1 7-9.4V6Z"/><path d="m9.4 12 1.9 1.9 3.6-3.7"/></svg>
-        <span>Watchlist</span>
-      </button>
-    </div>
-
-    <div class="navgroup">
-      <div class="navlabel">Infrastructure</div>
-      <button class="tab navitem" data-tab="ledger">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.8" y="6.6" width="13" height="10.8" rx="2"/><path d="m15.8 13 5.4 3.1V7.9L15.8 11Z"/></svg>
-        <span>Camera ledger</span>
-      </button>
-      <button class="tab navitem" data-tab="workers">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.6"/><rect x="3" y="14" width="18" height="6" rx="1.6"/></svg>
-        <span>Workers</span>
-      </button>
-      <button class="tab navitem" data-tab="diagnostics">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.5-6 4 12 2.5-6h5"/></svg>
-        <span>ANPR diagnostics</span>
-      </button>
-    </div>
-
-    <div class="navgroup">
-      <div class="navlabel">Analysis</div>
-      <button class="tab navitem" data-tab="cost">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5V9.8"/><path d="M9.3 19.5V4.5"/><path d="M14.7 19.5v-7.2"/><path d="M20 19.5V7.3"/></svg>
-        <span>Capacity &amp; cost</span>
-      </button>
-      <button class="tab navitem" data-tab="reports">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3.2H7a1.8 1.8 0 0 0-1.8 1.8v14A1.8 1.8 0 0 0 7 20.8h10a1.8 1.8 0 0 0 1.8-1.8V8Z"/><path d="M14 3.2V8h4.8"/></svg>
-        <span>Reports</span>
-      </button>
+      <h2 class="navlabel" id="nav-cameras">Cameras</h2>
+      <div role="tablist" aria-labelledby="nav-cameras">
+        <button class="navitem" data-page="cameras" role="tab" aria-selected="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.8" y="6.6" width="13" height="10.8" rx="2"/><path d="m15.8 13 5.4 3.1V7.9L15.8 11Z"/></svg>
+          <span>Cameras</span>
+        </button>
+      </div>
     </div>
 
     <div class="rail-foot">
-      <b>Model 5 Hybrid</b><br />
-      Registry + ANPR + inferred GIS.<br />
-      Departmental recording stays local.
+      <p>Full video stays in departmental stores. This console holds vehicle
+         crops, metadata and authorised references only.</p>
+      <p class="rail-env"><span id="envLabel">production</span></p>
     </div>
   </nav>
 
-  <!-- ===================== MAIN ===================== -->
   <div class="main">
-
     <header class="topbar">
-      <div class="topbar-title">
-        <div class="crumb">Gujarat CCTV Hybrid P0</div>
-        <h1>Vehicle monitoring console</h1>
+      <div>
+        <p class="crumb" id="pageCrumb">Investigate</p>
+        <h1 id="pageTitle">Overview</h1>
       </div>
-      <div class="meta" id="hostMeta">loading host…</div>
+      <div class="topbar-actions">
+        <span class="chip" id="plateChip" title="Number-plate recognition status">Plate reading: checking…</span>
+        <!-- Created by app.js only when the server reports developer mode. In
+             production this anchor never exists, so it cannot advertise /dev. -->
+        <a class="btn-quiet hidden" id="devConsoleLink" href="/dev">Developer console</a>
+        <button class="btn-quiet" id="btnSignOut">Sign out</button>
+      </div>
     </header>
 
-    <div class="statusbar">
-      <div class="banner" id="coverageBanner">Coverage loading…</div>
-      <div class="stats" id="statsBar"></div>
-      <div class="striprow">
-        <div class="demo" id="demoStrip">Demo: workers idle · last sighting —</div>
-        <div class="hunt" id="huntStrip">Hunt idle — set max concurrent cameras, then pin working cameras or hunt all live feeds.</div>
-      </div>
-    </div>
+    <div class="banner banner-error hidden" id="connectionBanner" role="alert"></div>
 
-    <div class="notice">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11.2v5"/><circle cx="12" cy="7.9" r=".9" fill="currentColor" stroke="none"/></svg>
-      <div><b>This is not a central VMS.</b> Full video stays in departmental stores; the centre holds plate crops, metadata and authorised incident references only. Routes are <b>inferred</b> from camera sightings, never verified travel. Vehicle identity is not confirmed by attribute match alone.</div>
-    </div>
+    <main class="content" id="content">
 
-    <div class="layout">
+      <!-- ============ OVERVIEW ============ -->
+      <section class="page" data-page="overview" aria-labelledby="pageTitle">
+        <div class="tiles" id="overviewTiles"></div>
 
-      <!-- ---------- MAP COLUMN ---------- -->
-      <div class="map-wrap">
-        <div id="map"></div>
+        <section class="panel">
+          <header class="panel-head">
+            <h2>Feed sources</h2>
+            <p class="panel-meta">The totals above, split by where the footage comes from.</p>
+          </header>
+          <div class="panel-body feedgrid" id="feedPanel"></div>
+        </section>
 
-        <div id="previewBox" class="preview hidden">
-          <div class="row">
-            <b id="previewTitle">Preview</b>
-            <button class="secondary" id="btnClosePreview">Close preview</button>
-          </div>
-          <video id="previewVideo" controls></video>
-          <img id="previewImage" class="hidden" alt="live camera snapshot" />
-          <p class="muted" id="previewNote">Browser preview is not proof that analytics is active. Government HLS stays server-side; this shows an operator snapshot.</p>
+        <div class="split">
+          <section class="panel">
+            <header class="panel-head">
+              <h2>Latest vehicle observations</h2>
+              <button class="btn-quiet" data-goto="search">Open vehicle search</button>
+            </header>
+            <div class="panel-body" id="overviewRecent"></div>
+          </section>
+
+          <section class="panel">
+            <header class="panel-head">
+              <h2>Open alerts</h2>
+              <button class="btn-quiet" data-goto="alerts">Review alerts</button>
+            </header>
+            <div class="panel-body" id="overviewAlerts"></div>
+          </section>
         </div>
-      </div>
 
-      <!-- ---------- PANEL COLUMN ---------- -->
-      <aside>
+        <aside class="notice">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11.2v5"/><circle cx="12" cy="7.9" r=".9" fill="currentColor" stroke="none"/></svg>
+          <div>
+            <strong>How to read these results.</strong>
+            Vehicle colour is an <em>estimate</em> and needs a person to confirm it.
+            Vehicle type is shown as <em>Unknown</em> until someone verifies it —
+            the automatic classifier has not met the accuracy required for
+            operational use. A vehicle with no readable number plate is still
+            recorded. Matching colour and type does not mean two records are the
+            same vehicle.
+          </div>
+        </aside>
+      </section>
 
-        <div class="toolbar">
-          <label class="field compact">
-            <span>Max concurrent</span>
-            <input class="js-max-concurrent" id="maxConcurrent" type="number" min="1" max="30" value="4" />
-          </label>
-          <button id="btnHuntPin">Pin working cameras</button>
-          <button id="btnHuntStart">Hunt all live feeds</button>
-          <button class="secondary" id="btnHuntStop">Stop hunt</button>
-          <button class="secondary" id="btnAnalyze">Run own-feed analysis</button>
-          <button class="secondary" id="btnRefresh">Refresh</button>
-          <button class="secondary" id="btnSync">Sync catalogue</button>
+      <!-- ============ VEHICLE SEARCH ============ -->
+      <section class="page hidden" data-page="search">
+        <section class="panel">
+          <header class="panel-head">
+            <h2>Search vehicle observations</h2>
+            <div class="quickrange" role="group" aria-label="Quick time range">
+              <button class="btn-quiet" data-range="1">Last hour</button>
+              <button class="btn-quiet" data-range="6">Last 6 hours</button>
+              <button class="btn-quiet" data-range="24">Last 24 hours</button>
+              <button class="btn-quiet" data-range="168">Last 7 days</button>
+            </div>
+          </header>
+          <form class="panel-body filter-form" id="searchForm">
+            <div class="field">
+              <label for="fStart">From</label>
+              <input type="datetime-local" id="fStart" required />
+            </div>
+            <div class="field">
+              <label for="fEnd">To</label>
+              <input type="datetime-local" id="fEnd" required />
+            </div>
+            <div class="field">
+              <label for="fFeed">Feed source</label>
+              <select id="fFeed">
+                <option value="">Both feeds</option>
+                <option value="government">Government cameras</option>
+                <option value="own">Own test feed</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="fCamera">Camera</label>
+              <select id="fCamera"><option value="">All cameras</option></select>
+            </div>
+            <div class="field">
+              <label for="fColor">Colour</label>
+              <select id="fColor"><option value="">Any colour</option></select>
+              <p class="field-note" id="fColorNote"></p>
+            </div>
+            <div class="field">
+              <label for="fType">Vehicle type</label>
+              <select id="fType"><option value="">Any type</option></select>
+              <p class="field-note" id="fTypeNote"></p>
+            </div>
+            <div class="field">
+              <label for="fPlate">Number plate</label>
+              <select id="fPlate">
+                <option value="">Any</option>
+                <option value="ok">Plate was read</option>
+                <option value="plate_unreadable">Plate unreadable</option>
+                <option value="plate_not_visible">Plate not visible</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="fReview">Review state</label>
+              <select id="fReview">
+                <option value="">Any</option>
+                <option value="pending">Review required</option>
+                <option value="verified">Verified by a person</option>
+              </select>
+            </div>
+            <div class="field field-actions">
+              <button type="submit" id="btnSearch">Search</button>
+              <button type="button" class="btn-secondary" id="btnExport">Export CSV</button>
+            </div>
+          </form>
+        </section>
+
+        <div id="searchWarnings"></div>
+        <section class="panel">
+          <header class="panel-head">
+            <h2>Results</h2>
+            <p class="panel-meta" id="searchMeta"></p>
+          </header>
+          <div class="panel-body" id="searchResults"></div>
+        </section>
+      </section>
+
+      <!-- ============ VEHICLE MOVEMENT ============ -->
+      <section class="page hidden" data-page="movement">
+        <section class="panel">
+          <header class="panel-head"><h2>Trace a number plate</h2></header>
+          <form class="panel-body filter-form" id="movementForm">
+            <div class="field">
+              <label for="mPlate">Number plate</label>
+              <input id="mPlate" placeholder="GJ01AB1234" required />
+            </div>
+            <div class="field">
+              <label for="mDay">Date</label>
+              <input id="mDay" type="date" />
+              <p class="field-note">Leave blank for the last 24 hours.</p>
+            </div>
+            <div class="field field-actions">
+              <button type="submit" id="btnMovement">Show sightings</button>
+              <button type="button" class="btn-secondary" id="btnMovementCsv">Export CSV</button>
+              <button type="button" class="btn-secondary" id="btnMovementGeo">Export map file</button>
+            </div>
+          </form>
+        </section>
+
+        <div class="split split-map">
+          <section class="panel">
+            <header class="panel-head"><h2>Sightings on the map</h2></header>
+            <div class="map-shell"><div id="movementMap"></div></div>
+            <p class="panel-foot">
+              Gold dashes join sightings in time order. Blue lines are roads the
+              vehicle <em>could</em> have taken between them. Both are
+              <strong>inferred</strong> from where it was seen — neither is a
+              recorded or verified route.
+            </p>
+          </section>
+          <section class="panel">
+            <header class="panel-head"><h2>Sighting list</h2></header>
+            <div class="panel-body" id="movementList"></div>
+          </section>
         </div>
-        <p class="legend">Vehicle detection and colour/type estimates are the primary live-feed output. Number-plate recognition is optional and can be switched on only for suitable cameras.</p>
+      </section>
 
-        <!-- ========== INVESTIGATION ========== -->
-        <section data-panel="investigate">
-          <h2>Vehicle investigation</h2>
-          <p class="legend">Search by vehicle type, colour, camera and time. Matches share selected attributes; identity is not confirmed.</p>
-          <div class="grid-form investigation-form">
-            <label>Vehicle type <select id="invType"><option value="">Any type</option></select></label>
-            <label>Vehicle colour <select id="invColor"><option value="">Any colour</option></select></label>
-            <label>Camera <select id="invCamera"><option value="">Any camera</option></select></label>
-            <label>Minimum detection confidence <input id="invConfidence" type="number" min="0" max="1" step="0.05" value="0" /></label>
-            <label>Start time <input id="invStart" type="datetime-local" /></label>
-            <label>End time <input id="invEnd" type="datetime-local" /></label>
-          </div>
-          <div class="row">
-            <button class="secondary" data-investigation-window="1">Last hour</button>
-            <button class="secondary" data-investigation-window="6">Last 6 hours</button>
-            <button class="secondary" data-investigation-window="24">Last 24 hours</button>
-            <button id="btnInvestigate">Search observations</button>
-            <a class="button secondary" id="dlInvestigationCsv" href="#">CSV</a>
-          </div>
-          <div id="investigateOut" class="card muted">Set a time range to find vehicle observations.</div>
-          <div id="investigationResults" class="evidence-grid"></div>
+      <!-- ============ ALERTS ============ -->
+      <section class="page hidden" data-page="alerts">
+        <section class="panel">
+          <header class="panel-head">
+            <h2>Watchlist alerts</h2>
+            <p class="panel-meta">Raised only on an exact match to an active watchlist plate.</p>
+          </header>
+          <div class="panel-body" id="alertList"></div>
+        </section>
+      </section>
+
+      <!-- ============ WATCHLIST ============ -->
+      <section class="page hidden" data-page="watchlist">
+        <section class="panel">
+          <header class="panel-head"><h2>Add a plate to the watchlist</h2></header>
+          <form class="panel-body filter-form" id="watchlistForm">
+            <div class="field">
+              <label for="wPlate">Number plate</label>
+              <input id="wPlate" placeholder="GJ01AB1234" required />
+            </div>
+            <div class="field">
+              <label for="wPurpose">Reason</label>
+              <select id="wPurpose">
+                <option value="stolen_vehicle">Stolen vehicle</option>
+                <option value="wanted_vehicle">Wanted in an investigation</option>
+                <option value="court_order">Court or warrant order</option>
+                <option value="traffic_offence">Traffic offence</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="wPriority">Priority</label>
+              <select id="wPriority">
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <div class="field field-actions">
+              <button type="submit" id="btnWatchAdd">Add to watchlist</button>
+            </div>
+            <p class="field-note field-wide">
+              Adding a plate re-checks sightings already recorded, so an alert can
+              appear immediately for a vehicle seen earlier today.
+            </p>
+          </form>
         </section>
 
-        <!-- ========== LIVE VEHICLES ========== -->
-        <section data-panel="vehicles" class="hidden">
-          <h2>Recent vehicle observations</h2>
-          <p class="legend">Type and colour are estimates from the visible vehicle body. Each card is one local camera track.</p>
-          <div id="liveVehicles" class="card muted">Waiting for vehicle records…</div>
+        <section class="panel">
+          <header class="panel-head"><h2>Active watchlist</h2></header>
+          <div class="panel-body" id="watchlistRows"></div>
         </section>
 
-        <!-- ========== PLATE MAP ========== -->
-        <section data-panel="monitor" class="hidden">
-          <h2>Vehicle day map</h2>
-          <p class="legend">Numbered sightings in time order. Gold dashed = inferred camera-to-camera. Navy = OSM snap-to-road possible path, not a verified route. No Google Maps key.</p>
-          <div class="row">
-            <input id="monPlate" value="GJ01AB1234" />
-            <input id="monDay" type="date" />
-            <button id="btnMonitor">Show day path</button>
-            <a class="button secondary" id="dlDayCsv" href="#">CSV</a>
-            <a class="button secondary" id="dlDayGeo" href="#">GeoJSON</a>
-          </div>
-          <div id="monitorStatus" class="card muted">Enter a plate to plot the last 24 hours, or pick a date.</div>
-          <div id="monitorTimeline"></div>
+        <section class="panel">
+          <header class="panel-head">
+            <h2>Plates read by the system</h2>
+            <p class="panel-meta">From recorded sightings. Add one to the watchlist to be alerted next time.</p>
+          </header>
+          <div class="panel-body" id="observedPlates"></div>
         </section>
+      </section>
 
-        <!-- ========== PLATE TOOLS ========== -->
-        <section data-panel="alerts" class="hidden">
-          <h2>Optional plate tools</h2>
-          <div id="plateRecognitionSettings" class="card muted">Loading ANPR setting…</div>
-          <div class="row"><button id="btnTogglePlateRecognition" class="secondary">Toggle number-plate recognition</button></div>
-
-          <h2>Find designated plate</h2>
-          <div class="row">
-            <input id="plateQuery" value="GJ01AB1234" />
-            <button class="secondary" id="btnSearch">Show history</button>
-          </div>
-          <div id="history"></div>
-
-          <h2>Recent OCR strings</h2>
-          <div id="liveSightings" class="card muted">Waiting for sightings…</div>
-
-          <h2>Alerts <span class="h2-note">exact watchlist match only</span></h2>
-          <div id="alerts"></div>
-        </section>
-
-        <!-- ========== WATCHLIST ========== -->
-        <section data-panel="watchlist" class="hidden">
-          <h2>Authorised watchlist</h2>
-          <p class="legend">Exact normalised match only. Adding a plate rematches existing persisted sightings. Government video is not altered to manufacture a hit.</p>
-          <div class="row">
-            <input id="wlPlate" placeholder="Plate e.g. GJ01AB1234" />
-            <input id="wlPurpose" placeholder="purpose" value="stolen_vehicle" />
-            <select id="wlPriority">
-              <option value="high">high</option>
-              <option value="medium">medium</option>
-              <option value="low">low</option>
-            </select>
-            <button id="btnWatchAdd">Add and rematch</button>
-          </div>
-          <div id="watchlistRows"></div>
-          <h2>Observed plates <span class="h2-note">from sightings</span></h2>
-          <div id="observedPlates"></div>
-        </section>
-
-        <!-- ========== CAMERA LEDGER ========== -->
-        <section data-panel="ledger" class="hidden">
-          <h2>Camera ledger</h2>
-          <div class="row">
-            <select id="ledgerFilter">
-              <option value="gov">Government catalogue</option>
-              <option value="own">Own-feed</option>
-              <option value="placeholder">Placeholders</option>
-              <option value="all">All</option>
-            </select>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>ID</th><th>Origin</th><th>Pri</th><th>Mode</th><th>Status</th>
-                  <th>Cat live</th><th>Decode</th><th>Proto</th><th>Size</th><th>Analytics</th>
-                </tr>
-              </thead>
-              <tbody id="ledger"></tbody>
-            </table>
-          </div>
-          <div id="cameraDetail"></div>
-        </section>
-
-        <!-- ========== WORKERS ========== -->
-        <section data-panel="workers" class="hidden">
-          <h2>Worker manager</h2>
-          <p class="legend">Max concurrent cameras is how many live RTSP workers this host holds at once (default 4). Pin working cameras holds that many decode-ok feeds open with no 28s rotation. Hunt all live feeds rotates those slots. Measure probes the next 4 untested feeds only, roughly 6s each, and does not re-wait on already-failed RTSP. Decode means this host opened RTSP and got a frame, not that it read a plate.</p>
-          <div class="row">
-            <label class="field compact">
-              <span>Max concurrent</span>
-              <input class="js-max-concurrent" type="number" min="1" max="30" value="4" />
-            </label>
-            <button id="btnHuntPin2">Pin working cameras</button>
-            <button id="btnHuntStart2">Hunt all live feeds</button>
-            <button class="secondary" id="btnHuntStop2">Stop hunt</button>
-          </div>
-          <div id="capacityPanel" class="card muted">No capacity measurement yet.</div>
-          <div class="row">
-            <button id="btnMeasure">Measure government decode</button>
-            <button id="btnStartAccessible">Start accessible workers</button>
-          </div>
-          <div id="workerPanel" class="card muted">No worker snapshot yet.</div>
-          <div class="row">
-            <input id="workerCam" placeholder="Camera ID" />
-            <button id="btnStartWorker">Start</button>
-            <button class="secondary" id="btnStopWorker">Stop</button>
-            <button class="secondary" id="btnStopAll">Stop all</button>
+      <!-- ============ CAMERAS ============ -->
+      <section class="page hidden" data-page="cameras">
+        <section class="panel">
+          <header class="panel-head">
+            <h2>Cameras</h2>
+            <div class="panel-actions">
+              <button class="btn-secondary" id="btnCheckCameras">Check connections</button>
+              <button class="btn-secondary" id="btnRecheckFailed">Re-check unreachable</button>
+              <button class="btn-secondary" id="btnStartAvailable">Start monitoring available</button>
+              <button class="btn-secondary" id="btnStopAll">Stop all monitoring</button>
+            </div>
+          </header>
+          <div class="panel-body">
+            <div class="toolbar">
+              <div class="field">
+                <label for="cameraFeedFilter">Feed source</label>
+                <select id="cameraFeedFilter">
+                  <option value="all">Both feeds</option>
+                  <option value="government">Government cameras</option>
+                  <option value="own">Own test feed</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="cameraFilter">Status</label>
+                <select id="cameraFilter">
+                  <option value="all">Any status</option>
+                  <option value="monitoring">Monitoring now</option>
+                  <option value="available">Available</option>
+                  <option value="unreachable">Unreachable</option>
+                  <option value="not_checked">Not checked</option>
+                </select>
+              </div>
+              <div class="field field-grow">
+                <label for="cameraSearch">Find a camera</label>
+                <input id="cameraSearch" type="search" placeholder="Name, city or ID" />
+              </div>
+            </div>
+            <div id="cameraList"></div>
           </div>
         </section>
 
-        <!-- ========== ANPR DIAGNOSTICS ========== -->
-        <section data-panel="diagnostics" class="hidden">
-          <h2>ANPR recognition diagnostics</h2>
-          <p class="legend">CPU-only plate detection and OCR attempts. Empty reads carry a specific reason; processed evidence is labelled and never reconstructs characters.</p>
-          <div id="recognitionSummary" class="card muted">No recognition diagnostics yet.</div>
-          <div id="recognitionAttempts"></div>
-        </section>
+        <div class="split split-map">
+          <section class="panel">
+            <header class="panel-head"><h2>Camera locations</h2></header>
+            <div class="map-shell"><div id="cameraMap"></div></div>
+          </section>
+          <section class="panel" id="cameraDetailPanel">
+            <header class="panel-head"><h2>Camera detail</h2></header>
+            <div class="panel-body" id="cameraDetail"></div>
+          </section>
+        </div>
 
-        <!-- ========== CAPACITY & COST ========== -->
-        <section data-panel="cost" class="hidden">
-          <h2>Capacity and cost estimator</h2>
-          <p class="legend">Every result is an estimate, not a measured production result. No savings percentage is claimed.</p>
-          <div class="grid-form">
-            <label>Cameras <input id="c_count" type="number" value="30" /></label>
-            <label>Avg bitrate kbps <input id="c_br" type="number" value="1500" /></label>
-            <label>Target analysis FPS <input id="c_fps" type="number" value="2" step="0.1" /></label>
-            <label>Active cameras <input id="c_active" type="number" value="2" /></label>
-            <label>Measured worker FPS <input id="c_wfps" type="number" value="0" step="0.1" /></label>
-            <label>GPU hourly cost <input id="c_gpu" type="number" value="0" step="0.01" /></label>
-            <label>Storage cost / GB <input id="c_sto" type="number" value="0" step="0.01" /></label>
-            <label>Evidence events / day <input id="c_ev" type="number" value="100" /></label>
-          </div>
-          <div class="row"><button id="btnCost">Calculate estimate</button></div>
-          <pre id="costOut" class="card"></pre>
+        <section class="panel">
+          <details class="disclosure">
+            <summary><h2>Add a camera</h2></summary>
+            <form class="panel-body filter-form" id="cameraForm">
+              <div class="field">
+                <label for="nId">Camera ID</label>
+                <input id="nId" required placeholder="CAM-AHM-014" />
+              </div>
+              <div class="field">
+                <label for="nName">Name</label>
+                <input id="nName" placeholder="Ring Road Junction" />
+              </div>
+              <div class="field">
+                <label for="nDept">Department</label>
+                <input id="nDept" placeholder="Home" />
+              </div>
+              <div class="field">
+                <label for="nCity">City</label>
+                <input id="nCity" placeholder="Ahmedabad" />
+              </div>
+              <div class="field">
+                <label for="nLat">Latitude</label>
+                <input id="nLat" inputmode="decimal" placeholder="23.0225" />
+              </div>
+              <div class="field">
+                <label for="nLng">Longitude</label>
+                <input id="nLng" inputmode="decimal" placeholder="72.5714" />
+              </div>
+              <div class="field field-actions">
+                <button type="submit" id="btnAddCamera">Add camera</button>
+              </div>
+              <p class="field-note field-wide">
+                A new camera starts as <strong>Not checked</strong>. It is only
+                reported as available once this system has opened its stream.
+                Connection settings are configured by an administrator on the
+                server and are never entered or shown here.
+              </p>
+            </form>
+          </details>
         </section>
+      </section>
 
-        <!-- ========== REPORTS ========== -->
-        <section data-panel="reports" class="hidden">
-          <h2>Downloadable reports</h2>
-          <div class="row">
-            <a class="button" id="dlJson" href="#">Sightings JSON</a>
-            <a class="button secondary" id="dlCsv" href="#">Sightings CSV</a>
-          </div>
-          <p class="muted">Reports include plate, OCR, camera, department, timestamps, confidence, model id/hash, run id, evidence, and alert status.</p>
-        </section>
-
-      </aside>
-    </div>
+    </main>
   </div>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/hls.js@1.5.17/dist/hls.min.js"></script>
-<script src="/static/app.js?v=20260913-console-1"></script>
+<!-- ======================= OBSERVATION DETAIL ======================= -->
+<dialog id="detailDialog" aria-labelledby="detailTitle">
+  <div class="dialog-head">
+    <h2 id="detailTitle">Vehicle observation</h2>
+    <button class="btn-quiet" id="btnCloseDetail" aria-label="Close">Close</button>
+  </div>
+  <div class="dialog-body" id="detailBody"></div>
+</dialog>
+
+<!-- ======================= CONFIRMATION ======================= -->
+<dialog id="confirmDialog" aria-labelledby="confirmTitle">
+  <div class="dialog-head"><h2 id="confirmTitle">Confirm</h2></div>
+  <div class="dialog-body"><p id="confirmText"></p></div>
+  <div class="dialog-foot">
+    <button class="btn-secondary" id="confirmCancel">Cancel</button>
+    <button id="confirmOk">Confirm</button>
+  </div>
+</dialog>
+
+<div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/static/vendor/leaflet/leaflet.js?v=20260914-prod-1"></script>
+<script src="/static/app.js?v=20260914-prod-1"></script>
 </body>
 </html>

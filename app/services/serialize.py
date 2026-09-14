@@ -24,12 +24,52 @@ def ist_label(dt: datetime | None) -> str | None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 from app.security import hls_requires_server_credential, redact_url
-from app.services.coverage import camera_origin
+from app.services.coverage import camera_origin, feed_of
 from app.services.processing import select_processing_route
 
 
-def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str = "") -> dict:
-    return {
+#: How a camera's reachability reads to an investigator. A camera is NEVER
+#: reported as available on the strength of it being listed in the catalogue:
+#: "ok" means this host opened the stream and decoded a frame, and everything
+#: that has not been probed stays in its own `not_checked` bucket rather than
+#: being rounded down to offline or up to online.
+AVAILABILITY_TEXT = {
+    "monitoring": ("Monitoring", "Analytics are running on this camera now."),
+    "available": ("Available", "This host opened the stream and decoded a frame."),
+    "unreachable": ("Unreachable", "This host could not open the stream when it last tried."),
+    "not_checked": ("Not checked", "This camera's connection has not been tested yet."),
+}
+
+
+def camera_availability(c: Camera, *, worker_state: str = "") -> str:
+    if c.analytics_active or worker_state == "running":
+        return "monitoring"
+    if c.decode_status == "ok":
+        return "available"
+    if c.decode_status == "failed":
+        return "unreachable"
+    return "not_checked"
+
+
+def camera_public(
+    c: Camera,
+    *,
+    preview_active: bool = False,
+    worker_state: str = "",
+    include_connection: bool = False,
+) -> dict:
+    """Serialise a camera for the API.
+
+    ``include_connection`` adds the stream URI, the HLS/WHEP endpoints and the
+    raw decoder error. Those describe how to reach a government feed and can
+    carry an embedded credential, so they are off by default and only the
+    developer console asks for them. Everything an investigator needs --
+    where the camera is, whether it is reachable, when it last produced a
+    frame -- is in the default payload.
+    """
+    availability = camera_availability(c, worker_state=worker_state)
+    label, explanation = AVAILABILITY_TEXT[availability]
+    payload = {
         "id": c.id,
         "name": c.name,
         "department": c.department,
@@ -42,7 +82,13 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "coords_are_placeholder": (c.coords_source or "") == "placeholder",
         "coords_are_inferred": (c.coords_source or "") == "inferred_place",
         "source_type": c.source_type,
-        "source_uri_redacted": redact_url(c.source_uri),
+        # own | government. The production console labels and filters on this,
+        # so the two demonstration paths can be told apart on screen.
+        "feed": feed_of(c),
+        "availability": availability,
+        "availability_label": label,
+        "availability_detail": explanation,
+        "decode_tested": bool(c.decode_tested_at),
         "has_rtsp": bool(c.protected_rtsp_url_or_reference or (c.source_type == "rtsp" and c.source_uri)),
         "has_substream": bool(c.substream_uri),
         "priority_class": c.priority_class,
@@ -61,7 +107,6 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "last_frame_at_ist": ist_label(c.last_frame_at),
         "last_hunted_at": utc_iso(getattr(c, "last_hunted_at", None)),
         "last_hunted_at_ist": ist_label(getattr(c, "last_hunted_at", None)),
-        "last_error": c.last_error,
         "capabilities": c.capabilities,
         "vendor": c.vendor,
         "model": c.model,
@@ -74,11 +119,10 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "reported_fps": c.reported_fps,
         "bitrate": c.bitrate,
         "origin": camera_origin(c),
-        "whep_url": redact_url(c.whep_url),
-        "hls_url": "" if hls_requires_server_credential(c.hls_url) else redact_url(c.hls_url),
         "hls_preview_blocked": hls_requires_server_credential(c.hls_url),
         "catalogue_synced_at": c.catalogue_synced_at.isoformat() if c.catalogue_synced_at else None,
         "decode_tested_at": c.decode_tested_at.isoformat() if c.decode_tested_at else None,
+        "decode_tested_at_ist": ist_label(c.decode_tested_at),
         "decode_status": c.decode_status,
         "source_pts_ms": c.source_pts_ms,
         "last_pts_ms": c.last_pts_ms,
@@ -88,6 +132,16 @@ def camera_public(c: Camera, *, preview_active: bool = False, worker_state: str 
         "measured_at": c.measured_at.isoformat() if c.measured_at else None,
         "route": select_processing_route(c),
     }
+    if include_connection:
+        payload.update(
+            {
+                "source_uri_redacted": redact_url(c.source_uri),
+                "whep_url": redact_url(c.whep_url),
+                "hls_url": "" if hls_requires_server_credential(c.hls_url) else redact_url(c.hls_url),
+                "last_error": c.last_error,
+            }
+        )
+    return payload
 
 
 def parse_vehicle_blob(raw) -> dict | None:
@@ -139,17 +193,38 @@ def plate_keys(s: Sighting) -> set[str]:
     return {s.plate_norm, s.plate_voted, layout_hint(s.plate_norm or ""), layout_hint(s.plate_voted or "")} - {""}
 
 
+#: Lower sorts first. The operator needs the high-priority watchlist hits at the
+#: top of the queue; an alert whose watchlist row has since been deleted sorts
+#: with medium rather than being hidden or silently promoted.
+ALERT_PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def alert_priority_rank(a: Alert) -> int:
+    wl = getattr(a, "watchlist", None)
+    return ALERT_PRIORITY_RANK.get((getattr(wl, "priority", "") or "").lower(), 1)
+
+
 def alert_json(a: Alert, cam: Camera | None) -> dict:
     s = a.sighting
     event = parse_vehicle_blob(getattr(s, "vehicle_json", None)) if s else None
     veh = (event or {}).get("vehicle") or {}
+    wl = getattr(a, "watchlist", None)
     return {
         "id": a.id,
         "plate_norm": a.plate_norm,
         "match_type": a.match_type,
         "status": a.status,
+        # Carried from the watchlist row that produced the match, so the queue
+        # can be ordered by operational severity instead of arrival time alone.
+        "watchlist_id": a.watchlist_id,
+        "priority": (getattr(wl, "priority", "") or "") if wl else "",
+        "purpose": (getattr(wl, "purpose", "") or "") if wl else "",
+        "authority": (getattr(wl, "authority", "") or "") if wl else "",
         "camera_id": a.camera_id,
         "camera_name": cam.name if cam else "",
+        # An alert raised on the synthetic own feed must not read like a live
+        # enforcement hit, so the card says which feed produced it.
+        "feed": feed_of(cam),
         "city": cam.city if cam else "",
         "department": cam.department if cam else "",
         "location": (event or {}).get("location") or (cam.city if cam else "") or (cam.name if cam else ""),

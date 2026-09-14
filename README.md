@@ -1,8 +1,50 @@
-# Gujarat CCTV Hybrid P0
+# Gujarat Police Vehicle Investigation Platform
 
-Solo four-day hackathon build. **Grok / Codex generates the code.** The human owns government-feed access, gate calls, and demo honesty.
+**Gujarat Police Hackathon — CCTV Integration Challenge.** A unified camera
+registry, live vehicle analytics and watchlist alerting for 26 departments,
+designed to scale from 32 cameras today to ~80,000 statewide.
 
-This is **not** a statewide VMS and **not** an 80,000-camera load test.
+This is **not** a statewide VMS and **not** an 80,000-camera load test. It is a
+running reference implementation with measured accuracy and stated limits.
+
+## Quick start
+
+```bash
+conda activate gujhac                      # or: python -m venv .venv && source .venv/bin/activate
+python -m pip install -r requirements.txt
+python scripts/pull_vehicle_attributes.py  # OpenVINO attribute weights (~22 MB)
+python scripts/seed.py                     # cameras + representative watchlist
+
+APP_ENV=production ENABLE_DEVELOPER_UI=false \
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+```
+
+The server prints the URL to open. Sign in with the operator access token —
+`p0-operator` by default; see [Operator access token](#operator-access-token).
+
+Optional ANPR stack (plate detection and OCR):
+`pip install -r requirements-cpu-anpr.txt` then
+`python scripts/setup_cpu_anpr.py`. The platform detects, tracks and describes
+vehicles without it.
+
+## Submission documents
+
+Everything for the hackathon submission is in [`final_report/`](final_report/):
+
+| File | What it is |
+|---|---|
+| `Gujarat_Police_Hackathon_Solution_Presentation.pptx` | 16-slide solution presentation — model choice and justification, solution overview, key features, measured accuracy, scaling to 80,000 |
+| `Gujarat_Police_Hackathon_HLD.docx` | High-Level Design / technical proposal — architecture, integration, analytics, security, full scalability plan, department information requirements |
+| `DEMO_VIDEO_SCRIPTS.md` | Shot-by-shot scripts for both required demo videos (own feed, government feed) |
+| `diagrams/` | The five architecture diagrams embedded in the HLD |
+| `_build_*.py` | Regenerate the documents after a re-measurement rather than hand-editing them |
+
+```bash
+pip install -r requirements-dev.txt
+cd final_report && python _build_diagrams.py && python _build_presentation.py && python _build_hld.py
+```
+
+---
 
 Official solution: **Customised Model 5 Hybrid Architecture**
 
@@ -14,6 +56,491 @@ Official solution: **Customised Model 5 Hybrid Architecture**
 Working story:
 
 > Onboard heterogeneous feeds into a vendor-neutral registry, persist reviewable ANPR sightings, exact-match an authorised watchlist, and show timestamped evidence plus **inferred** GIS movement, while departmental recording stays local.
+
+## Vehicle type and colour (deterministic, no LLM/VLM)
+
+Vehicle detection, type and colour are the core function and run **independently of
+ANPR**. A missing, unreadable or failed plate never removes a vehicle observation and
+never changes its type or colour.
+
+```
+frame -> yolov8n (COCO 2,3,5,7; FP16 on CUDA, FP32 on CPU, batch 1)
+      -> ByteTrack persistent track ids          (needs `lap`; greedy-IoU fallback otherwise)
+      -> crop-quality gate                        (size, sharpness, exposure, clipping, visibility)
+      -> best N crops per track
+      -> OpenVINO vehicle-attributes-recognition-barrier-0042   (type[4] + colour[7] probabilities)
+      -> quality x confidence weighted aggregation, type and colour separately
+      -> abstention gate (min prob, top-2 margin, temporal agreement, min observations)
+      -> optional ANPR (off by default)           -- cannot affect type or colour
+      -> ONE observation per track -> DB + JSONL + best crop + context frame
+```
+
+The previous Ollama/Gemma path is gone. It produced unsupported attributes — including a
+rule that promoted a COCO `car` into `suv`/`taxi_cab`/`auto_rickshaw`/`van` on the model's
+say-so — and on this host it logged **137 consecutive authentication failures with zero
+successes**. Vehicle attributes now come only from `app/services/vehicle_attributes.py`.
+
+### What is genuinely supported
+
+| | Emitted | **Never emitted** (no weight on this host supports it) |
+|---|---|---|
+| Type | `car`, `van`, `truck`, `bus` (OMZ) · `two_wheeler` (COCO id 3) | `suv`, `auto_rickshaw`, `taxi_cab` → always `unknown` |
+| Colour | `white`, `gray`, `yellow`, `red`, `green`, `blue`, `black` | `silver`, `brown`, `orange`, `other` → always `unknown` |
+
+`gray` is never rewritten to `silver`, and `car` is never promoted to `suv`. Those labels
+remain filterable so historic rows stay searchable, but the API marks them unsupported.
+
+Model: Intel Open Model Zoo `vehicle-attributes-recognition-barrier-0042`, **Apache-2.0**.
+Input `[1,3,72,72]` NCHW **BGR**, raw 0-255, no mean/scale. Output order is pinned in code
+and in a test — note the published `accuracy-check.yml` `label_map` is *alphabetical* and is
+**not** the output index order; using it silently swaps `car` and `bus`.
+
+Vendor accuracy on **their barrier/toll dataset** (not Indian CCTV): type avg 87.34%
+(`bus` only 68.57%), colour avg 82.71% (`yellow` only 61.50%). **No accuracy has been
+measured for this deployment** — there is no labelled Indian validation set.
+
+### Install and run
+
+```bash
+CONDA=/home/useraakash/miniconda3/envs/gujhac/bin
+
+# Attribute weights (~22 MB, Apache-2.0). Idempotent, records SHA-256.
+$CONDA/python scripts/pull_vehicle_attributes.py
+
+# Runtime deps: OpenVINO for the attribute model, lap for ByteTrack.
+$CONDA/pip install "openvino>=2024.0" "lap>=0.5.12"
+
+# If torch cannot see the GPU, its CUDA build does not match the driver.
+# This host needed cu124 (driver 535.183.01 / CUDA 12.2):
+$CONDA/pip install --index-url https://download.pytorch.org/whl/cu124 torch==2.6.0 torchvision==0.21.0
+
+$CONDA/python scripts/check_host.py      # preflight: torch/CUDA, weights, ByteTrack
+```
+
+All paths below are relative to the repository root, so `cd` there first. There is no
+`python` on this host's PATH — use the conda interpreter explicitly (or activate the env
+with `conda activate gujhac`).
+
+```bash
+cd /home/useraakash/guj_pol_archit/Gujarat-Police-Hackathon
+CONDA=/home/useraakash/miniconda3/envs/gujhac/bin
+
+# Video file
+$CONDA/python scripts/vehicle_pipeline.py --source clip.mp4 --out data/runs/a.jsonl --contact-sheet
+
+# Catalogue camera (credentials applied from .env, never logged)
+$CONDA/python scripts/vehicle_pipeline.py --camera cam01 --max-frames 300 --stride 3 --anpr \
+    --record data/samples/cam01.mp4 --out data/runs/live.jsonl --contact-sheet
+
+# Directory of images, CPU only
+$CONDA/python scripts/vehicle_pipeline.py --source data/frames/cam-surat --device cpu \
+    --out data/runs/cpu.jsonl
+```
+
+Modes: `baseline` (pretrained, above), `custom` (fine-tuned weights — none exist, so it
+exits non-zero naming every missing file and its exact class order), `evaluate` (per-class
+P/R/F1, macro-F1, confusion, coverage and abstention rate against a labelled JSONL manifest).
+
+### Measured on this host
+
+RTX A4500, `yolov8n` @ imgsz 640 FP16 CUDA + OpenVINO attributes on CPU, cam01 night feed:
+
+| | |
+|---|---|
+| Detect + track latency | p50 **5.0 ms**, p95 8.1 ms → ~190 fps compute-only |
+| Attribute inference | p50 **1.5 ms** per crop (CPU, OpenVINO) |
+| Peak VRAM | **13.0 MB** allocated / 35.7 MB reserved — far under the 2-3 GB target |
+| Offline mp4 throughput | 34.3 fps wall-clock at stride 3 |
+| CPU-only fallback | 44.6 fps compute-only, 0 MB VRAM, FP16 correctly reported false |
+
+Wall-clock fps on a live RTSP camera is bounded by the stream's own real-time rate, not by
+compute; the metrics file reports both numbers separately.
+
+### Measured accuracy — 59 hand-labelled tracks, cam01 night
+
+Ground truth: `data/labels/tracks.jsonl`. Tracks were labelled **blind**, from contact
+sheets carrying no model predictions (`scripts/label_tracks.py`), across two disjoint video
+segments. 14 of 59 crops were too dark or blurred to call and are excluded as `unclear`.
+
+> **Annotation caveat.** These labels were produced by the assistant that wrote this code,
+> from the same crops, not by an independent human annotator. They are a sanity check, not a
+> gold standard. The numbers below are the right order of magnitude, not certified.
+
+| | Coverage | Selective precision |
+|---|---|---|
+| **Vehicle type** (28 supported-class tracks) | 64% | **50%** |
+| **Vehicle colour** (42 supported-class tracks) | 71% | **83%** |
+
+On the 17 tracks whose true class the model cannot represent (`auto_rickshaw`, `suv`), it
+correctly abstained **82%** of the time; 3 were false attributions (`auto_rickshaw → truck`
+twice, `suv → car`).
+
+**Vehicle type is not fit for use on this camera.** Two findings say so:
+
+1. Only 2 of 15 buses were called `bus`; 6 became `truck`. This model gives Indian city
+   buses a `bus` probability of ~0.002 while saying `truck` at 0.99.
+2. **Raising the confidence threshold makes type precision worse** — 50% at 0.60 down to
+   30% at 0.95. The errors are confident and systematic, not noisy, so no threshold reaches
+   the 95%-precision objective. Thresholds cannot fix a domain mismatch.
+
+Conflict-policy comparison on the deterministic 20-track segment (all 35 tracks matched):
+
+| `VATTR_CONFLICT_POLICY` | Coverage | Selective precision |
+|---|---|---|
+| `detector` (default) | 90.0% | 50.0% |
+| `abstain` | 55.0% | 36.4% |
+| `classifier` | 85.0% | 29.4% |
+
+`detector` wins on both axes — COCO YOLO genuinely separates bus from truck, and abstaining
+was discarding the cases it got right. This default was chosen on 20 tracks of the same
+data, so it is a fit, not an independent validation.
+
+**Colour is the usable signal**, and it plateaus: real runs at min-prob 0.55 / 0.65 / 0.75
+gave 81% / 83% / 81% precision at 78% / 67% / 59% coverage. The dominant error is
+`white → red` (4 cases) — night-time brake lights and red signage cast on white bodies.
+`silver` is unreachable, so both true silver cars were missed (one → `gray`, one → `red`).
+
+**The 95% precision objective is not reachable with this pretrained model at any threshold.**
+Reaching it requires fine-tuning on labelled Indian data.
+
+### Safeguards this measurement forced
+
+| Safeguard | Behaviour |
+|---|---|
+| Vehicle type is **suppressed** | The operational `vehicle_type` is `unknown` unless a human verified the record or a model clears `type_deployment_gate()`. The gate fails closed and the shipped model is deliberately not listed. |
+| Raw candidate always kept | `metadata_json["attributes"]` retains the candidate label, confidence, temporal agreement, model source, reason and full probability vectors, for diagnostics only. |
+| Colour is **estimated**, never verified | Exposed, but always carried with `verified=false`, `review_required=true` and its confidence and agreement. |
+| Manual correction | `POST /api/vehicle-observations/{id}/review` records a human verdict that wins over the model and is never overwritten by a later frame. The model's answer survives for audit in `review_history`. |
+| Search | Colour is an optional filter and every response carries a warning that it both misses and wrongly includes vehicles. Type filters match **verified records only**. Neither is ever mandatory. |
+| ANPR | Optional. Every plate failed in the smoke run and all 35 vehicle observations were still persisted with evidence. |
+
+The UI badges each attribute `VERIFIED` / `ESTIMATED` / `UNKNOWN` (colour plus border
+weight plus an explicit text label, not colour alone) and renders the measured accuracy
+table wherever attributes are shown.
+
+Frozen evidence — labels, predictions, evaluator output and a note on one discarded
+contaminated measurement — is in [`docs/poc_evaluation/`](docs/poc_evaluation/README.md).
+
+### Multi-vehicle crops (found after the POC evaluation)
+
+In dense traffic the crop handed to the classifier often contains a *second* vehicle.
+Measured on cam01: **243 of 276 crops** came from frames holding more than one vehicle,
+**20% of crops contained >25%** of a neighbour, and 5% contained more neighbour than
+subject. ByteTrack was not at fault — 0 of 247 track transitions were suspicious.
+
+Two defects followed, both now fixed:
+
+1. `extend_box` grows the detector box 1.6× before the 115→72 centre crop, which reaches
+   into the next vehicle. `crop_quality` now measures `foreign_fraction` and rejects a crop
+   as `multi_vehicle_crop` above `VATTR_MAX_FOREIGN_FRACTION` (default 0.25).
+2. The aggregation weight was `quality.score * probs.max()` computed **per attribute**.
+   Because the type and colour heads peak on different crops, the two attributes were
+   weighted differently over the same track — which is how one record ended up with one
+   vehicle's type beside another's colour. Both attributes now share a single weight per
+   crop.
+
+Re-measured on the 35-track offline segment (a different basis from the headline table
+above, so not comparable row-for-row):
+
+| | Coverage before → after | Precision before → after |
+|---|---|---|
+| Vehicle type | 55% → 60% | **36% → 67%** (4/11 → 8/12) |
+| Vehicle colour | 78% → 63% | 81% → 71% (17/21 → 12/17) |
+
+Type improved materially. Colour moved by two tracks on n≤21, which is not distinguishable
+from noise. Thresholds were deliberately **not** retuned to improve that, because tuning on
+the evaluation set would invalidate it.
+
+### Exporting reviews for future fine-tuning
+
+```bash
+$CONDA/python scripts/vehicle_pipeline.py --mode export-reviews --out data/labels/reviews.jsonl
+```
+
+Dumps human-verified observations with the crop, box, corrected label and the model's
+original answer. It trains nothing. Two cautions it prints: split by `video` (adjacent
+frames of one vehicle are near-duplicates and will inflate accuracy), and drop rows with
+`crop_foreign_fraction > 0` — a two-vehicle crop teaches the wrong thing.
+
+### Camera slot rotation
+
+Slot selection used to sort by id with `PIN_DEFAULT` forced first, and strict decode
+tiering meant untested cameras never got a slot — so they stayed untested forever. On this
+catalogue that left **25 of 32 cameras unreachable** while the same 6 were pinned on every
+click. Selection now rotates by least-recently-hunted within decode tiers, and
+`HUNT_EXPLORE_FRACTION` (default 0.5) reserves half the slots for untested cameras.
+Measured: 8 clicks at 4 slots now reach **20 distinct cameras** instead of 4.
+`HUNT_ROTATION=fixed` restores the old behaviour.
+
+Reproduce:
+
+```bash
+cd /home/useraakash/guj_pol_archit/Gujarat-Police-Hackathon
+CONDA=/home/useraakash/miniconda3/envs/gujhac/bin
+$CONDA/python scripts/label_tracks.py --runs data/runs/offline data/runs/final --out data/labels
+# fill in data/labels/tracks.jsonl, then:
+$CONDA/python scripts/vehicle_pipeline.py --mode evaluate --manifest data/labels/tracks.jsonl \
+    --predictions data/runs/offline/observations.jsonl data/runs/final/observations.jsonl
+```
+
+## Interfaces: production console and developer console
+
+There are two front ends, and only one of them is served by default.
+
+| | Production console | Developer console |
+|---|---|---|
+| URL | `/` | **`/dev`** |
+| Served when | always | `APP_ENV` is not `production` **and** `ENABLE_DEVELOPER_UI=true` |
+| Files | `app/static/` (public mount) | `app/devui/` (**not** mounted; served by a gated route) |
+| Audience | investigators | engineers |
+
+**`/` is always the production console, in both modes.** The developer console
+is at `/dev`, never at `/`. Run either of these and the server prints the URLs
+it is actually serving:
+
+```bash
+# Production — what you demo
+APP_ENV=production ENABLE_DEVELOPER_UI=false \
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+#   production console   http://127.0.0.1:8010/
+#   /dev returns 404
+
+# Development — your own tooling, plus the production console alongside it
+APP_ENV=development ENABLE_DEVELOPER_UI=true \
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+#   production console   http://127.0.0.1:8010/
+#   developer console    http://127.0.0.1:8010/dev
+```
+
+In developer mode the production console also shows a **Developer console**
+link in its top bar. In production that element is never created and the route
+404s.
+
+### Production console (`/`)
+
+An investigator's workflow: overview → cameras → vehicle search → observation
+detail → manual review → export. It asks for the operator access token at
+sign-in (the token is no longer embedded in the JavaScript) and holds it for
+the browser tab only. Evidence images are fetched with that header and shown
+from object URLs, so no credential is ever written into the DOM or into a URL.
+
+What it will and will not say:
+
+* **Vehicle type is always `Unknown`** unless a person verified it. The type
+  deployment gate has not been cleared, so no automatic type reaches the
+  screen — including on the ~1,500 legacy rows that still hold one.
+* **Colour is shown as an estimate**, and only when it came from the
+  deterministic OpenVINO attribute model. Values written by the retired VLM
+  path or the OpenCV HSV baseline are presented as `Unknown` with a note.
+* **Unsupported classes are never shown as predictions.** `suv`,
+  `auto_rickshaw`, `silver`, `orange` and the rest are stored and exported but
+  displayed as `Unknown`. A person may still record one as a verdict.
+* **A plate failure never removes the vehicle.** Every observation carries one
+  of: the plate text (marked *Estimated*), `Plate unreadable`,
+  `Plate not visible`, or `Not checked`, each with a plain-language reason.
+* **A camera is only `Available` once this host has opened its stream.**
+  `Not checked` is its own state, never rounded to online or offline.
+* Backend failures show one sentence plus a reference; the detail is logged
+  server-side.
+
+### Two feed paths, shown separately
+
+The console splits every figure by where the footage came from, because the two
+paths demonstrate different things and one combined number credits each with the
+other's results:
+
+| | Own test feed | Government cameras |
+|---|---|---|
+| Source | frames generated on this host (`scripts/generate_own_feed.py`) | authorised live RTSP |
+| Demonstrates | plate read → watchlist match → **alert**, end to end | detection, tracking and colour on real traffic at scale |
+| Action | *Analyse own feed* | *Check connections*, *Start monitoring available* |
+
+The own feed is **synthetic**, so it is labelled a **test feed** everywhere it
+appears, and an alert raised on it carries an explicit line saying the match is
+real but the vehicle is not. Overview has a *Feed sources* panel, Cameras has a
+Feed column and filter, and Vehicle search has a `Feed source` filter
+(`?feed=own|government`) whose two halves always sum to the unfiltered total.
+
+### Developer console (`/dev`)
+
+The previous console, unchanged plus a labelling tab: raw JSON, probability
+vectors, model ids and hashes, decode/FPS panels, detector and OCR diagnostics,
+threshold controls, the worker manager, the capacity and cost estimator.
+Nothing was deleted — it is simply not served in production, and neither are the
+routes it depends on:
+
+| Route | Production | Developer |
+|---|---|---|
+| `GET /dev`, `/dev/console.{js,css}` | 404 | 200 |
+| `GET /api/recognition/diagnostics` | 404 | 200 |
+| `GET /api/diagnostics/{camera_id}` | 404 | 200 |
+| `GET /api/cameras` | no stream URIs, no raw decoder errors | full payload |
+| `GET /api/vehicle-observations/{id}` | no `metadata`, no `raw` block | probability vectors included |
+| `GET /api/vehicles/{plate}`, `/api/alerts` | no model id / hash / run id | full payload |
+| `GET /api/dev/label-queue` | 404 | 200 |
+
+### Bulk labelling (`/dev` → Labelling)
+
+Building the fine-tuning set. The production search **cannot** find the rows
+worth labelling, by design: the type deployment gate forces `vehicle_type` to
+`unknown` in the column on all 3,569 gated rows (the model's answer survives only
+in `metadata_json.attributes.type_candidate`), and the colour filter hides
+values from retired sources. Measured on the current database:
+
+| filter | production `/api/investigations/vehicles` | developer `/api/dev/label-queue` |
+|---|---|---|
+| `vehicle_type=truck` | 0 | **576** |
+| `vehicle_type=bus` | 0 | **379** |
+| `vehicle_color=white` | 371 | **948** |
+| `vehicle_color=silver` | 0 | **343** |
+| `color_source=legacy` | not filterable | **1,584** |
+
+So the queue matches the **raw** model output, on a route that returns 404 in
+production. The 59 frozen evaluation tracks in `data/labels/tracks.jsonl` are
+excluded, so the published 50%/83% figures stay a held-out measurement.
+
+Keyboard-driven — digits for type, letters for colour, no mode switch:
+
+| | |
+|---|---|
+| Type | `1` car · `2` suv · `3` two-wheeler · `4` truck · `5` bus · `6` van · `7` auto-rickshaw · `8` taxi · `0` unknown |
+| Colour | `w` white · `k` black · `s` silver · `e` grey · `r` red · `b` blue · `g` green · `y` yellow · `o` orange · `n` brown · `t` other · `u` unknown |
+| Control | `a` accept the model's reading · `Space` save + next · `→` next · `←` back · `x` skip · `c` clear · `z` undo · `m` tight/context crop |
+
+Every chip prints its key on screen. Saves are optimistic with a serial outbox,
+so typing never waits on the network; a failed save lands in a **Retry failed**
+strip rather than disappearing. `z` is a real undo — it re-posts the previous
+values (`""` to clear), the same path the API already supported.
+
+**What the labels are worth.** The model's reading is shown by default (there is
+a *Hide model reading* toggle). That is much faster, and it is the right
+trade-off for fine-tuning — but an annotator who sees "truck 0.83" agrees with it
+more often, so these labels tend to reproduce the model's *systematic* errors:
+Indian buses read as trucks, white read as red under brake lights, both named in
+`POC_ACCURACY["notes"]` as its real failure modes. Every verdict therefore
+records how it was produced, and `--mode export-reviews` reports it:
+
+```
+python scripts/vehicle_pipeline.py --mode export-reviews --out data/labels/reviews_export.jsonl
+```
+
+Each row carries `provenance` (`blind` / `assisted` / `unknown`),
+`prediction_visible`, `accepted_model`, `context_crop_used`, `annotator` and the
+`scope` that was being swept. Rows whose verdict is `unknown` are marked
+`usable: false` — an abstention is not a training target, and it would otherwise
+walk into the export as an example labelled "unknown". Use assisted labels to
+**train**, never to re-measure accuracy.
+
+Recognition attempts, observation metadata, audit events and the frozen
+evaluation artefacts are **still written** in production. The gates control who
+can read them back, not whether they exist. CSV and GeoJSON evidence exports
+still carry the model identifiers, because an exhibit has to say which model
+produced a reading.
+
+To turn the developer console on:
+
+```
+APP_ENV=development
+ENABLE_DEVELOPER_UI=true
+```
+
+Both are required. `/dev` stays unreachable while `APP_ENV=production`, so a
+production deployment cannot expose it by setting one variable by mistake.
+
+`/dev` itself checks only the developer flag, not the token. The console it
+serves still has to sign in for every API call it makes, so an unauthenticated
+visitor gets an empty shell — but treat the flag as "this machine is a
+developer machine", not as an access control.
+
+## Operator access token
+
+### The value
+
+**`p0-operator`** — the default, used unless you override it.
+
+It is the `ADMIN_TOKEN` setting (`Settings.admin_token` in
+[`app/config.py`](app/config.py)). It is a **shared demo token committed as a
+default**, not a secret. Change it before this runs anywhere real.
+
+### Signing in
+
+Open the console at `/`, type the token into **Operator access token**, and
+press Sign in. The console validates it against `GET /api/settings/recognition`
+(an operator-only route), so a wrong token is rejected at the door rather than
+half way through an investigation.
+
+The token is held in `sessionStorage` for that browser tab only:
+
+* it survives a page reload, so a refresh does not sign you out;
+* it is gone when the tab closes, and **Sign out** in the top bar clears it;
+* it travels only in the `Authorization: Bearer …` header — never in a URL, a
+  link, or the page itself. Evidence images and CSV/GeoJSON exports are fetched
+  with the same header and handed to the browser as object URLs.
+
+Previously `app/static/app.js` contained `const TOKEN = "p0-operator"`. It no
+longer does, and `tests/test_security_source.py` fails if a token is ever
+re-embedded in a file served from `/static`.
+
+### Changing it
+
+Set it in `.env` (or the environment) and restart the server — it is read once
+at startup:
+
+```
+ADMIN_TOKEN=<your-token>
+VENDOR_INGEST_TOKEN=<token-for-vendor-event-POSTs>
+```
+
+```bash
+# verify the new value is the one being enforced
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer <your-token>" \
+  http://127.0.0.1:8000/api/settings/recognition     # expect 200
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer wrong" \
+  http://127.0.0.1:8000/api/settings/recognition     # expect 401
+```
+
+Anyone already signed in keeps working until their tab is closed or a request
+returns 401, at which point the console returns them to the sign-in screen with
+"Your session has ended."
+
+### What it authorises
+
+The token is required for **everything that writes, exports or reveals
+evidence** — 31 routes, including:
+
+| | |
+|---|---|
+| Review and enforcement | `POST /api/vehicle-observations/{id}/review`, `PATCH /api/alerts/{id}`, `POST`/`PATCH /api/watchlist…` |
+| Camera operations | `POST /api/cameras`, `/api/cameras/{id}/analyze`, `/api/workers/…`, `/api/hunt/…`, `/api/capacity/measure` |
+| Evidence and exports | `GET /api/evidence`, `/api/cameras/{id}/snapshot`, `…/export.csv`, `…/export.geojson`, `/api/reports/…` |
+| Settings | `GET`/`PATCH /api/settings/recognition` |
+
+Two other credentials exist and are separate:
+
+* `VENDOR_INGEST_TOKEN` (default `p0-vendor`) — only `POST /api/vendor/events`.
+* `CCTV_ACCESS_TOKEN` / `CCTV_ACCESS_USERNAME` — the **government feed**
+  credentials. Server-side only. They are never sent to the browser, and
+  `redact_secrets()` strips them from anything logged.
+
+### Known limitations of this scheme
+
+Honest, because a P0 auth model should not be mistaken for a production one:
+
+* **Read endpoints are open.** `GET /api/cameras`, `/api/alerts`,
+  `/api/investigations/vehicles`, `/api/ui/overview` and the rest of the list
+  above answer without a token. The production payloads carry no stream URIs,
+  no credentials and no model identifiers, but anyone who can reach the port
+  can read the observation list. Put the service behind a network boundary or
+  an SSH tunnel — do not expose `0.0.0.0` to an untrusted network.
+* **One shared token, so there is no per-person identity.** Every audit entry
+  and every `verified_by` records the actor as `operator`. "Who confirmed this
+  colour" is answerable only down to "someone holding the operator token".
+  Real accounts are out of P0 scope.
+* **`REQUIRE_AUTH=false` weakens it in a specific way**: a request with *no*
+  token is accepted, while a request with a *wrong* token is still rejected.
+  Leave it `true`.
+* There is no expiry, rotation or revocation. Changing `ADMIN_TOKEN` and
+  restarting is the whole rotation procedure.
 
 ## Architecture
 
@@ -75,13 +602,31 @@ $env:DEMO_AUTOSTART_WORKERS = "true"
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Leave that window open all day. Open http://127.0.0.1:8000
+Leave that window open all day. Open http://127.0.0.1:8000 and sign in with the
+operator token.
 
-**Hunt all live feeds** rotates the configured capture slots; it does not claim every catalogue camera is decoded simultaneously. CPU FastALPR handles the immediate plate path. Uncertain high-quality crops enter one bounded background Ollama queue, so cloud latency does not consume a capture slot.
+**Start monitoring available** (Cameras page) holds open the configured capture
+slots; it does not claim every catalogue camera is decoded simultaneously. CPU
+FastALPR handles the immediate plate path. Uncertain high-quality crops enter
+one bounded background Ollama queue, so cloud latency does not consume a
+capture slot. The rotating **Hunt** controls live in the developer console.
 
-- **Monitor** — plate + optional date → numbered map, dashed inferred camera-to-camera links, OSM **snap-to-road** possible path (OSRM Match by default, not a proven route), CSV/GeoJSON export.
-- **Investigate** — time range → which cameras had analytics running (not a full-video archive).
-- **Alerts / Watchlist** — exact match only; own-feed `GJ01AB1234` is the guaranteed demo hit.
+- **Overview** — cameras monitoring / available / not checked, vehicles in the
+  last 24 hours, how many await review, open alerts. Every figure is counted
+  from the database; nothing is estimated.
+- **Vehicle search** — time range, camera, colour, plate state and review
+  state → results with the best crop, attributes, plate state and review
+  action. CSV export.
+- **Vehicle movement** — plate + optional date → sightings grouped into stops,
+  numbered on the map, joined by dashed **inferred** links (not a proven
+  route), CSV export.
+- **Alerts / Watchlist** — exact match only; own-feed `GJ01AB1234` is the
+  guaranteed demo hit.
+- **Cameras** — status, check connections, start/stop monitoring, analyse
+  recorded video, single live frame, add a camera.
+
+Snap-to-road possible paths (OSRM Match) and the GeoJSON export remain
+available through `/api/vehicles/{plate}/export.geojson`.
 
 No Google Maps API. Default matching is the public OSRM Match server (no credit card). Optional Mapbox / Geoapify tokens stay in `.env` and are never sent to the browser.
 
@@ -133,11 +678,13 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 Open http://127.0.0.1:8000
 
-Default operator token: `p0-operator` (override with `ADMIN_TOKEN`). Vendor ingest token: `p0-vendor` (`VENDOR_INGEST_TOKEN`).
+Sign in with the operator access token — `p0-operator` by default. See
+[Operator access token](#operator-access-token) for how to change it and what
+it authorises.
 
-1. **Run own-feed analysis** — OpenCV frames + Ollama vision on generated Ahmedabad and Surat plates.
-2. Search `GJ01AB1234` — sightings, evidence crops, dashed inferred path.
-3. Review alerts (ack / confirm / reject). Coverage stays honest: only feeds that are actually being processed are `analytics_active`.
+1. **Cameras → Analyse recorded video** — OpenCV frames + CPU ANPR on the generated Ahmedabad and Surat plates.
+2. **Vehicle movement** → `GJ01AB1234` — sightings grouped into stops, evidence crops, dashed inferred path.
+3. **Alerts** — acknowledge / confirm / reject. Coverage stays honest: only feeds that are actually being processed are `analytics_active`.
 
 Own-feed verification:
 
@@ -318,6 +865,47 @@ Initial H.264/H.265 join warnings (RPS / missing POC) are treated as non-fatal f
 
 PTS regression or a large PTS jump ends the current passage, resets the character vote, writes an audit event, and continues. Tracks are never joined across that discontinuity.
 
+## Camera registry onboarding and gap analysis (reference Model 1)
+
+Three onboarding routes, all additive — an import never deletes a camera and never
+blanks a field the file omits:
+
+| Route | Endpoint | UI |
+|---|---|---|
+| API (government catalogue) | `POST /api/catalogue/sync` | **Sync catalogue** button |
+| Manual entry | `POST /api/cameras` | Camera ledger → *Onboard cameras* |
+| Bulk import | `POST /api/cameras/import` | Camera ledger → *Onboard cameras* → CSV box |
+
+Bulk import accepts CSV text or a JSON list. The header must contain `id` (or
+`camera_id`); optional columns are `name, department, city, lat, lng, source_type,
+source_uri, substream_uri, priority_class, processing_mode, analytics_policy,
+network_class, vendor, model`.
+
+**Health columns cannot be imported.** `decode_status`, `analytics_active` and
+`status` are measured by this host, never asserted by a file. Every newly
+onboarded camera starts `decode_status=untested`, and `lat`/`lng` must arrive as
+a pair or not at all — a half pair is rejected rather than half-guessed.
+
+```bash
+curl -X POST http://127.0.0.1:8010/api/cameras/import \
+  -H "Authorization: Bearer $CCTV_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"csv":"id,name,city,lat,lng,source_type\nCAM-NEW-001,North Gate,Surat,21.1702,72.8311,rtsp\n"}'
+```
+
+### Gap-analysis report
+
+`GET /api/reports/gap-analysis.json` and `/api/reports/gap-analysis.csv` (operator
+token required) report where the fleet is blind:
+
+- `never_probed`, `decode_failed`, `placeholder_coords`, `coordinates_out_of_bounds`
+- `no_vehicle_observations`, `no_plate_reads`
+- per-city rollup and `uncovered_cities_no_working_camera`
+
+It is a gap analysis **of the inventory this host holds**, not of road coverage — a
+location with no registered camera cannot appear in it. `never_probed` means this
+host has not opened the stream yet, not that the camera is down. Camera URLs are
+redacted, so the report is safe to attach to a submission.
+
 ## Honest government-feed blocker
 
 Government-feed status is whatever this host actually observes after `POST /api/catalogue/sync` and a bounded RTSP probe. Do not claim 50 live government cameras. Do not treat catalogue `live=true` as `analytics_active`. Protected HLS credentials stay server-side; browser HLS preview is blocked unless a safe URL is available. WHEP may be used for on-demand preview. Analytics uses RTSP-over-TCP.
@@ -341,6 +929,12 @@ The UI posts user-supplied assumptions (camera count, bitrate, target FPS, activ
 - OpenCV may still use its internal FFmpeg backend for RTSP
 - Government catalogue credentials and a real remote GPU endpoint are external blockers
 - District GPU infrastructure is **not** deployed by this P0
+- The console runs **offline**: Leaflet and hls.js are vendored under
+  `app/static/vendor/`. Only the OSM basemap tiles and the web fonts are still
+  remote, and both degrade to an on-screen notice rather than a blank page
+- **Plate text is not recoverable from the current government feeds.** Vehicle
+  detection, tracking, colour and evidence capture all work on them; ANPR does
+  not. The registration-number trace is demonstrable on the own feed only
 - GIS links are inferred from timestamped sightings, not proven road polylines
 - No live VAHAN / NAPIX / NAFIS / face / person ReID
 - No Kafka, Kubernetes, or Elasticsearch

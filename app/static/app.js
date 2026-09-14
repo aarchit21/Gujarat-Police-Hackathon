@@ -1,950 +1,1721 @@
-const TOKEN = "p0-operator";
-const map = L.map("map").setView([22.3, 71.2], 7);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "&copy; OpenStreetMap",
-}).addTo(map);
+/* =========================================================================
+   Vehicle Investigation Console
+   =========================================================================
+   Rules this file follows, because the consequences of breaking them are
+   operational rather than cosmetic:
 
-const markers = L.layerGroup().addTo(map);
-const links = L.layerGroup().addTo(map);
-const routes = L.layerGroup().addTo(map);
-let previewCam = null;
-let hlsPlayer = null;
-let snapshotTimer = null;
-let didFitCameras = false;
-let lastCameras = [];
+   * Nothing is displayed as a fact unless the server said it is one. Colour is
+     an estimate, automatic vehicle type is suppressed, and a camera is never
+     drawn as available until this host has actually opened its stream.
+   * No counts are invented. Every figure on screen comes from an API response;
+     when a value is missing it is shown as "—", not as zero.
+   * Backend failures surface as a short sentence the operator can act on. The
+     raw text of an error never reaches the screen -- it is logged server-side.
+   * Every action that writes disables its control until the request settles, so
+     a second click cannot double-submit.
+   * Developer diagnostics live in the console at /dev and are not rendered or
+     fetched here.
+   ========================================================================= */
 
-function headers(json) {
-  const h = { Authorization: `Bearer ${TOKEN}` };
-  if (json) h["Content-Type"] = "application/json";
-  return h;
-}
+"use strict";
 
-async function j(url, opts = {}) {
-  const res = await fetch(url, {
-    ...opts,
-    headers: { ...headers(Boolean(opts.body)), ...(opts.headers || {}) },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return res.json();
-  return res.text();
-}
+// --------------------------------------------------------------- session ---
+// The access token is held for this browser tab only. It is never written into
+// the page, a URL or a link: evidence images are fetched with the same header
+// as every other request and shown from an object URL.
+const SESSION_KEY = "gp-operator-token";
+let token = sessionStorage.getItem(SESSION_KEY) || "";
 
-function statusClass(s) {
-  if (s === "connected") return "status-connected";
-  return "status-blocked";
-}
+const el = (id) => document.getElementById(id);
+const escapeHtml = (value) =>
+  String(value == null ? "" : value).replace(/[&<>"']/g, (ch) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 
-function coordNote(c, html = true) {
-  let text = "";
-  if (c.coords_are_inferred) text = "Approximate city from camera name — not surveyed GPS.";
-  else if (c.coords_are_placeholder) text = "placeholder map position (catalogue omitted lat/lng)";
-  if (!text) return "";
-  return html ? `${text}<br>` : text;
-}
-
-function resolutionText(c) {
-  if (c.width && c.height) return `${c.width}×${c.height}`;
-  return "—";
-}
-
-function govFeedText(h) {
-  return h.government_feed_label || h.government_feed_status || "—";
-}
-
-function ollamaVisionText(h) {
-  const v = h.ollama_vision || {};
-  if (v.label) return v.label;
-  if (!v.enabled) return "Ollama off";
-  const where = v.cloud ? "Ollama Cloud" : "Ollama local";
-  const live = v.live || v.reachable ? "live" : "not live";
-  const model = v.resolved_model || v.configured_model || "";
-  return `${where} · ${live}${model ? " · " + model : ""}`;
-}
-
-function formatWhen(iso) {
-  if (!iso) return "";
-  let text = String(iso);
-  if (/IST$/.test(text)) return text;
-  if (!/Z$|[+-]\d\d:\d\d$/.test(text)) text += "Z";
-  const d = new Date(text);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false }) + " IST";
-}
-
-function evidenceUrl(path) {
-  if (!path) return "";
-  return `/api/evidence?rel=${encodeURIComponent(path)}&token=${encodeURIComponent(TOKEN)}`;
-}
-
-async function loadCoverage() {
-  const h = await j("/api/health");
-  const db = h.database || {};
-  document.getElementById("hostMeta").textContent =
-    `DB ${db.type || "?"} · ${ollamaVisionText(h)} · gov ${govFeedText(h)}`;
-  document.getElementById("coverageBanner").textContent =
-    `${ollamaVisionText(h)}. ${h.honest_coverage}. Catalogue ${h.government_catalogue_count} (not a hardcoded 50). Own-feed ${h.own_feed_count}. Gov feed ${govFeedText(h)} — decode success is not a running worker. Last sync ${h.catalogue_synced_at || "never"}.`;
-  document.getElementById("statsBar").innerHTML = [
-    ["Onboarded", h.onboarded_count],
-    ["Own-feed", h.own_feed_count],
-    ["Gov catalogue", h.government_catalogue_count],
-    ["Connected", h.connected_count],
-    ["Analytics", h.analytics_active_count],
-    ["Blocked/deferred", h.blocked_count],
-    ["Queued", h.queued_count],
-    ["Gov feed", govFeedText(h)],
-    ["Ollama vision", ollamaVisionText(h)],
-    ["Enhancement", (h.vision_enhancement && h.vision_enhancement.enabled) ? h.vision_enhancement.method : "off"],
-    ["CPU ANPR", (h.cpu_anpr && h.cpu_anpr.models_ready) ? "FastALPR ready" : ((h.cpu_anpr && h.cpu_anpr.tesseract_available) ? "Tesseract fallback" : "not ready")],
-    ["Plate recognition", (h.plate_recognition && h.plate_recognition.enabled) ? "ON" : "OFF"],
-    ["ANPR attempts", (h.recognition && h.recognition.attempt_count) || 0],
-    ["YOLO", (h.yolo_detector && h.yolo_detector.label) || "—"],
-    ["Measured fps", h.measured_safe_fps || (h.capacity && h.capacity.measured_safe_fps) || "—"],
-    ["Recommended fps", h.recommended_target_fps || (h.capacity && h.capacity.recommended_target_fps) || "—"],
-    ["Database", db.type],
-    ["PostGIS", db.postgis ? "yes" : "no"],
-    ["Open captures", h.open_capture_count],
-    ["Previews", h.preview_active_count],
-    ["Catalogue live", h.catalogue_live_count],
-    ["Decode ok", h.decode_ok_count],
-    ["HTTP", h.catalogue_last_http_status || "—"],
-    ["Hunt visited", (h.hunt && `${h.hunt.visited_count || 0}/${h.hunt.total || 0}`) || "—"],
-    ["Hunt vehicles", (h.hunt && h.hunt.vehicles_seen) ?? "—"],
-    ["Review alerts", h.alerts_requiring_review],
-    ["Snap-to-road", (h.map_match && h.map_match.provider) ? `OSM ${h.map_match.provider}` : "OSRM (free OSM)"],
-  ]
-    .map(([k, v]) => `<span><b>${k}</b> ${v}</span>`)
-    .join("");
-  const demo = document.getElementById("demoStrip");
-  if (demo) {
-    demo.textContent = `Demo · analytics ${h.analytics_active_count || 0} running · last sighting ${h.last_sighting_plate || "—"} @ ${h.last_sighting_camera || "—"} ${formatWhen(h.last_sighting_at)} · ${ollamaVisionText(h)}`;
-  }
-  const huntEl = document.getElementById("huntStrip");
-  const hunt = h.hunt || {};
-  const slots = hunt.max_concurrent || (h.capacity && h.capacity.max_concurrent) || 4;
-  if (huntEl) {
-    huntEl.textContent = hunt.label
-      || `Hunt ${hunt.enabled ? "on" : "idle"} · hunting ${hunt.hunting_count || 0}/${hunt.total || 0} · visited ${hunt.visited_count || 0}/${hunt.total || 0} · vehicles ${hunt.vehicles_seen || 0} · plates ${hunt.plates_read || 0}. ${slots} concurrent slots on this host, not all catalogue cameras at once.`;
-  }
-  document.querySelectorAll(".js-max-concurrent").forEach((el) => {
-    if (document.activeElement !== el) el.value = String(slots);
-  });
-}
-
-function concurrentFromUi() {
-  const el = document.querySelector(".js-max-concurrent");
-  const n = Number(el && el.value);
-  if (!Number.isFinite(n) || n < 1) return 4;
-  return Math.min(30, Math.floor(n));
-}
-
-function cameraBucket(c) {
-  if (c.origin === "own_feed") return "own";
-  if (c.origin === "government_catalogue") return "gov";
-  return "placeholder";
-}
-
-async function loadCameras() {
-  lastCameras = await j("/api/cameras");
-  renderLedger();
-}
-
-function renderLedger() {
-  const filter = (document.getElementById("ledgerFilter") || {}).value || "gov";
-  const body = document.getElementById("ledger");
-  if (!body) return;
-  markers.clearLayers();
-  body.innerHTML = "";
-  const pts = [];
-  lastCameras
-    .filter((c) => filter === "all" || cameraBucket(c) === filter)
-    .forEach((c) => {
-    const color = c.analytics_active || c.worker_state === "running" ? "#2f6f4e" : c.last_hunted_at ? "#38a169" : c.catalogue_live ? "#2c5282" : c.status === "onboarded" || c.status === "connected" ? "#c4a35a" : "#9b2c2c";
-    if (c.lat != null && c.lng != null && Number.isFinite(Number(c.lat)) && Number.isFinite(Number(c.lng))) {
-      pts.push([c.lat, c.lng]);
-      const marker = L.circleMarker([c.lat, c.lng], { radius: 7, color, fillOpacity: 0.85 })
-        .bindPopup(
-          `<b>${c.id}</b> · ${c.origin || ""}<br>${c.city || "location omitted"} · ${c.department}<br>${coordNote(c)}cat live ${c.catalogue_live} · decode ${c.decode_status}<br>hunting ${c.analytics_active ? "now" : "no"} · last hunted ${c.last_hunted_at_ist || "—"}<br>${c.status}: ${c.status_reason || ""}`
-        )
-        .addTo(markers);
-      marker.on("click", () => showCamera(c));
-    }
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${c.id}</td><td>${c.origin || ""}</td><td>${c.priority_class}</td><td>${c.processing_mode}</td><td class="${statusClass(c.status)}">${c.status}</td><td>${c.catalogue_live}</td><td>${c.decode_status}</td><td>${c.active_protocol || "—"}</td><td>${resolutionText(c)}</td><td>${c.analytics_active ? "yes" : "no"} / prev ${c.preview_active ? "yes" : "no"}</td>`;
-    tr.onclick = () => showCamera(c);
-    body.appendChild(tr);
-  });
-  if (!didFitCameras && pts.length) {
-    map.fitBounds(pts, { padding: [40, 40], maxZoom: 10 });
-    didFitCameras = true;
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
   }
 }
 
-function showCamera(c) {
-  document.getElementById("workerCam").value = c.id;
-  document.getElementById("cameraDetail").innerHTML = `
-    <div class="card">
-      <div><b>${c.id}</b> · ${c.name}</div>
-      <div class="muted">${c.department} · ${c.city || ""} · last frame ${c.last_frame_at || "—"}</div>
-      <div class="muted">origin ${c.origin || "—"} · codec ${c.codec || "unspecified"} · size ${resolutionText(c)} · pts ${c.last_pts_ms ?? "—"} · reconnects ${c.reconnect_count}</div>
-      <div class="muted">last error: ${c.last_error || "none"}</div>
-      <div class="row"><label class="muted">Plate recognition for this camera
-        <select data-plate-mode><option value="inherit" ${c.plate_recognition_mode === "inherit" ? "selected" : ""}>inherit global setting</option><option value="on" ${c.plate_recognition_mode === "on" ? "selected" : ""}>on when global is on</option><option value="off" ${c.plate_recognition_mode === "off" ? "selected" : ""}>off for this camera</option></select>
-      </label></div>
-      <div class="muted">${coordNote(c, false)}</div>
-      <div class="muted">${c.hls_preview_blocked ? "HLS stays server-side. Use Live frame." : ""}</div>
-      <div class="row" style="margin-top:6px">
-        <button data-prev="snapshot">Live frame</button>
-        <button class="secondary" data-prev="hls">HLS preview</button>
-        <button class="secondary" data-prev="whep">WHEP preview</button>
-        <button class="secondary" data-start="${c.id}">Start worker</button>
-        <button class="secondary" data-analyze="${c.id}">Bounded live analyze</button>
-      </div>
-    </div>`;
-  document.getElementById("cameraDetail").querySelectorAll("[data-prev]").forEach((btn) => {
-    btn.onclick = () => openPreview(c, btn.dataset.prev);
-  });
-  document.getElementById("cameraDetail").querySelector("[data-plate-mode]").onchange = async (event) => {
-    await j(`/api/cameras/${encodeURIComponent(c.id)}`, { method: "PATCH", body: JSON.stringify({ plate_recognition_mode: event.target.value }) });
-    await loadPlateRecognitionSettings();
-    await refresh();
-  };
-  document.getElementById("cameraDetail").querySelector("[data-start]").onclick = async () => {
-    await j(`/api/workers/${c.id}/start`, { method: "POST" });
-    refresh();
-  };
-  document.getElementById("cameraDetail").querySelector("[data-analyze]").onclick = async () => {
-    const btn = document.getElementById("cameraDetail").querySelector("[data-analyze]");
-    btn.disabled = true;
-    btn.textContent = "Analyzing…";
-    try {
-      const out = await j(`/api/cameras/${c.id}/analyze`, { method: "POST" });
-      alert(`camera ${out.camera_id || c.id} sightings=${out.sightings || 0} alerts=${out.alerts || 0} ${out.error || ""}`);
-      await refresh();
-    } catch (err) {
-      alert(String(err));
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Bounded live analyze";
-    }
-  };
-}
+const FALLBACK_ERROR = "Could not complete that request. Please try again.";
 
-function stopSnapshotTimer() {
-  if (snapshotTimer) {
-    clearInterval(snapshotTimer);
-    snapshotTimer = null;
-  }
-}
-
-function showSnapshotPreview(c, note) {
-  previewCam = c.id;
-  const box = document.getElementById("previewBox");
-  box.classList.remove("hidden");
-  document.getElementById("previewTitle").textContent = `${c.id} live frame`;
-  const video = document.getElementById("previewVideo");
-  const img = document.getElementById("previewImage");
-  video.classList.add("hidden");
-  video.removeAttribute("src");
-  img.classList.remove("hidden");
-  const load = () => {
-    img.src = `/api/cameras/${encodeURIComponent(c.id)}/snapshot?token=${encodeURIComponent(TOKEN)}&t=${Date.now()}`;
-  };
-  img.onerror = () => {
-    document.getElementById("previewNote").textContent =
-      "No live frame yet. Start a worker or bounded analyze first if RTSP is slow to open.";
-  };
-  load();
-  stopSnapshotTimer();
-  snapshotTimer = setInterval(load, 4000);
-  document.getElementById("previewNote").textContent =
-    note || "Operator snapshot from the server-side feed. Not a VMS archive. HLS is not sent to the browser.";
-}
-
-async function openPreview(c, protocol) {
-  const out = await j(`/api/cameras/${c.id}/preview`, {
-    method: "POST",
-    body: JSON.stringify({ protocol }),
-  });
-  if (out.preview_blocked || !out.ok) {
-    if (protocol !== "snapshot") {
-      showSnapshotPreview(c, out.error || "Stream preview unavailable; trying live frame.");
-      return;
-    }
-    alert(out.error || "preview blocked");
-    return;
-  }
-  if (out.protocol === "snapshot" || out.snapshot) {
-    showSnapshotPreview(c, out.note);
-    return;
-  }
-  previewCam = c.id;
-  const box = document.getElementById("previewBox");
-  box.classList.remove("hidden");
-  document.getElementById("previewTitle").textContent = `${c.id} ${out.protocol} preview`;
-  const video = document.getElementById("previewVideo");
-  const img = document.getElementById("previewImage");
-  img.classList.add("hidden");
-  video.classList.remove("hidden");
-  if (hlsPlayer) {
-    hlsPlayer.destroy();
-    hlsPlayer = null;
-  }
-  if (out.protocol === "hls" && window.Hls && Hls.isSupported()) {
-    hlsPlayer = new Hls();
-    hlsPlayer.loadSource(out.url);
-    hlsPlayer.attachMedia(video);
-  } else {
-    video.src = out.url;
-  }
-}
-
-async function closePreview() {
-  stopSnapshotTimer();
-  if (previewCam) {
-    try {
-      await j(`/api/cameras/${previewCam}/preview/stop`, { method: "POST" });
-    } catch (_e) {
-      /* ignore */
-    }
-  }
-  previewCam = null;
-  if (hlsPlayer) {
-    hlsPlayer.destroy();
-    hlsPlayer = null;
-  }
-  document.getElementById("previewVideo").removeAttribute("src");
-  const img = document.getElementById("previewImage");
-  if (img) {
-    img.removeAttribute("src");
-    img.classList.add("hidden");
-  }
-  document.getElementById("previewBox").classList.add("hidden");
-}
-
-async function loadWatchlist() {
-  const rows = await j("/api/watchlist");
-  const root = document.getElementById("watchlistRows");
-  if (!root) return;
-  if (!rows.length) {
-    root.innerHTML = `<div class="card muted">Watchlist is empty.</div>`;
-  } else {
-    root.innerHTML = rows
-      .map(
-        (w) => `<div class="card">
-          <div><b>${w.plate_norm}</b> · ${w.purpose} · ${w.priority} · ${w.active ? "active" : "inactive"}</div>
-          <div class="muted">${w.notes || ""}</div>
-          <div class="row" style="margin-top:6px">
-            <button class="secondary" data-hist="${w.plate_norm}">History</button>
-            <button class="secondary" data-wl="${w.id}" data-on="${w.active ? "0" : "1"}">${w.active ? "Deactivate" : "Activate + rematch"}</button>
-          </div>
-        </div>`
-      )
-      .join("");
-    root.querySelectorAll("[data-hist]").forEach((btn) => {
-      btn.onclick = () => {
-        document.getElementById("plateQuery").value = btn.dataset.hist;
-        document.querySelector('.tab[data-tab="alerts"]').click();
-        searchPlate();
-      };
+async function api(path, options = {}) {
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.headers || {}),
+      },
     });
-    root.querySelectorAll("[data-wl]").forEach((btn) => {
-      btn.onclick = async () => {
-        const on = btn.dataset.on === "1";
-        await j(`/api/watchlist/${btn.dataset.wl}`, {
-          method: "PATCH",
-          body: JSON.stringify({ active: on, rematch: on }),
-        });
-        loadWatchlist();
-        loadAlerts();
-      };
-    });
+  } catch (_networkError) {
+    throw new ApiError("The server could not be reached.", 0);
   }
-  const observed = await j("/api/observed-plates");
-  const obs = document.getElementById("observedPlates");
-  if (!observed.length) {
-    obs.innerHTML = `<div class="card muted">No persisted sightings yet.</div>`;
-    return;
+  if (response.status === 401) {
+    signOut("Your session has ended. Sign in again to continue.");
+    throw new ApiError("Not signed in.", 401);
   }
-  obs.innerHTML = observed
-    .slice(0, 40)
-    .map(
-      (p) => `<div class="card">
-        <div><b>${p.plate_norm}</b> · ${p.count} sighting(s) · last ${p.last_camera} · ${p.syntax_ok ? "syntax ok" : "syntax flag no"}</div>
-        <div class="muted">${p.last_time || ""} · ${p.model_id || ""} · ${p.watchlisted ? "already on watchlist" : "not watchlisted"}</div>
-        ${
-          p.watchlisted
-            ? ""
-            : `<button data-add="${p.plate_norm}">Add to watchlist and rematch</button>`
-        }
-      </div>`
-    )
-    .join("");
-  obs.querySelectorAll("[data-add]").forEach((btn) => {
-    btn.onclick = async () => {
-      const out = await j("/api/watchlist", {
-        method: "POST",
-        body: JSON.stringify({
-          plate_raw: btn.dataset.add,
-          purpose: "operator_added_from_sighting",
-          rematch: true,
-        }),
-      });
-      alert(`Watchlist ${out.plate_norm}. Rematch created ${out.rematch && out.rematch.alerts_created} alert(s) from persisted sightings.`);
-      loadWatchlist();
-      loadAlerts();
+  if (!response.ok) {
+    // The API returns either {"detail": "..."} for a rejected request or
+    // {"error": "...", "reference": "..."} for an unexpected failure. Both are
+    // written to be shown; anything else is replaced rather than echoed, so an
+    // unexpected body can never put a stack trace on screen.
+    let message = FALLBACK_ERROR;
+    try {
+      const body = await response.json();
+      const detail = typeof body.detail === "string" ? body.detail : body.error;
+      if (typeof detail === "string" && detail && detail.length < 200 && !detail.includes("Traceback")) {
+        message = detail;
+      }
+      if (body.reference) message += ` (reference ${body.reference})`;
+    } catch (_parseError) {
+      /* keep the fallback */
+    }
+    throw new ApiError(message, response.status);
+  }
+  const type = response.headers.get("content-type") || "";
+  return type.includes("application/json") ? response.json() : response.text();
+}
+
+function errorText(error) {
+  return error instanceof ApiError ? error.message : FALLBACK_ERROR;
+}
+
+// ------------------------------------------------------------- feedback ----
+let toastTimer = null;
+
+function toast(message, kind = "ok") {
+  const node = el("toast");
+  node.textContent = message;
+  node.className = `toast is-${kind}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.add("hidden"), 5000);
+}
+
+/** Run an action with its own control disabled, so it cannot be double-fired. */
+async function withBusy(button, action) {
+  if (!button || button.disabled) return undefined;
+  button.disabled = true;
+  button.classList.add("is-busy");
+  try {
+    return await action();
+  } finally {
+    button.disabled = false;
+    button.classList.remove("is-busy");
+  }
+}
+
+/** Used before any change to a value a person is accountable for. */
+function confirmAction(text, confirmLabel = "Confirm") {
+  return new Promise((resolve) => {
+    const dialog = el("confirmDialog");
+    el("confirmText").textContent = text;
+    el("confirmOk").textContent = confirmLabel;
+    const finish = (value) => {
+      dialog.close();
+      el("confirmOk").onclick = null;
+      el("confirmCancel").onclick = null;
+      resolve(value);
     };
+    el("confirmOk").onclick = () => finish(true);
+    el("confirmCancel").onclick = () => finish(false);
+    dialog.onclose = () => resolve(false);
+    dialog.showModal();
   });
 }
 
-function locationText(row) {
-  if (row.location) return row.location;
-  if (row.city) return row.city;
-  if (row.lat != null && row.lng != null) return `${Number(row.lat).toFixed(4)}, ${Number(row.lng).toFixed(4)}`;
-  return "location omitted";
+// States are rendered by one helper so loading, empty and failure always look
+// the same wherever they appear.
+function showLoading(node, rows = 3) {
+  node.innerHTML = `<div aria-busy="true" aria-label="Loading">${
+    '<div class="skeleton-row"></div>'.repeat(rows)}</div>`;
 }
 
-function vehicleRowCard(row, extraHtml) {
-  const veh = row.vehicle || {};
-  const unread = veh.unreadable_reason || "";
-  const gemma = row.gemma || {};
-  const gemmaText = gemma.plate_text
-    ? `YOLO+Gemma: ${gemma.plate_text}`
-    : gemma.skipped
-      ? `YOLO+Gemma: ${gemma.skipped}`
-      : gemma.called
-        ? "YOLO+Gemma: empty"
-        : "";
-  const vo = row.vision_only || {};
-  const enhancement = row.enhancement || {};
-  const confirmation = row.confirmation || {};
-  const recognition = row.recognition || {};
-  const enhancementText = enhancement.enabled
-    ? `${enhancement.method || "OpenCV"} Â· ${enhancement.profile || "vision"} Â· ${enhancement.view_count || 1} view(s)`
-    : enhancement.method === "none" ? "off" : "";
-  const voModels = vo.models || {};
-  const voLines = Object.keys(voModels)
-    .map((k) => {
-      const m = voModels[k] || {};
-      const t = m.plate_text || (m.skipped ? m.skipped : "empty");
-      return `Vision-only ${m.model || k}: ${t}`;
-    })
-    .join(" · ");
-  const number = veh.number || row.plate_norm || row.plate || (unread ? `unreadable (${unread})` : "—");
-  const type = veh.type || row.vehicle_type || "unknown";
-  const color = veh.color || row.vehicle_color || "—";
-  const when = row.observed_at_ist || row.source_time_ist || formatWhen(row.observed_at || row.source_time);
-  const cam = row.camera_id || "—";
-  const loc = locationText(row);
-  return `<div class="card">
-    <div class="vehicle-grid">
-      <div><span class="k">Vehicle number</span><b>${number}</b></div>
-      <div><span class="k">Vehicle type</span>${type}</div>
-      <div><span class="k">Colour</span>${color}</div>
-      <div><span class="k">Date / time (IST)</span>${when}</div>
-      <div><span class="k">Camera</span>${cam}</div>
-      <div><span class="k">Location</span>${loc}</div>
-      ${gemmaText ? `<div><span class="k">YOLO+Gemma</span>${gemmaText}</div>` : ""}
-      ${voLines ? `<div><span class="k">Vision-only</span>${voLines}</div>` : ""}
-      ${enhancementText ? `<div><span class="k">Image enhancement</span>${enhancementText}</div>` : ""}
-      <div><span class="k">Plate decision</span>${confirmation.status || "review"} · ${confirmation.support_count || 0}/${confirmation.required_frames || 2} frames</div>
-      ${recognition.reader_agreement ? `<div><span class="k">Reader agreement</span>${recognition.reader_agreement}</div>` : ""}
-    </div>
-    ${extraHtml || ""}
+function showEmpty(node, title, detail = "") {
+  node.innerHTML = `<div class="state"><strong>${escapeHtml(title)}</strong>${
+    detail ? `<p>${escapeHtml(detail)}</p>` : ""}</div>`;
+}
+
+function showError(node, error, retryLabel) {
+  node.innerHTML = `<div class="state state-error">
+    <strong>${escapeHtml(errorText(error))}</strong>
+    ${retryLabel ? `<button class="btn-secondary" data-retry>${escapeHtml(retryLabel)}</button>` : ""}
   </div>`;
 }
 
-async function loadLiveVehicles() {
-  const el = document.getElementById("liveVehicles");
-  if (!el) return;
-  const end = new Date();
-  const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
-  const data = await j(`/api/investigations/vehicles?${new URLSearchParams({ start: start.toISOString(), end: end.toISOString(), limit: "20", sort: "desc" })}`);
-  const rows = data.observations || [];
-  if (!rows.length) {
-    el.className = "card muted";
-    el.textContent = "No vehicle observations in the last 24 hours.";
+// ---------------------------------------------------------------- format ---
+// Every time on screen is Indian Standard Time in one shape: 2026-09-14 20:00.
+// The server sends a pre-formatted IST label for most fields; the rest are UTC
+// ISO strings converted here, so the two can never look like different clocks.
+function formatTime(row, isoField, istField) {
+  const ist = istField ? row[istField] : "";
+  if (ist) return String(ist).replace(" IST", "").slice(0, 16);
+  const iso = row[isoField];
+  if (!iso) return "—";
+  let text = String(iso);
+  if (!/Z$|[+-]\d\d:\d\d$/.test(text)) text += "Z";
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return "—";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(date).reduce((acc, part) => ({ ...acc, [part.type]: part.value }), {});
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+// Mirrors the server's display names so a dropdown, a confirmation prompt and
+// the record itself never spell the same value three different ways.
+const DISPLAY_NAMES = { suv: "SUV", two_wheeler: "Two-wheeler", taxi_cab: "Taxi" };
+
+function titleCase(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (DISPLAY_NAMES[raw]) return DISPLAY_NAMES[raw];
+  const text = raw.replace(/_/g, " ");
+  return text ? text[0].toUpperCase() + text.slice(1) : "";
+}
+
+function cameraLabel(row) {
+  const id = row.camera_id || row.id;
+  const name = row.camera_name || row.name || cameraNames.get(id) || id;
+  return name || "Unknown camera";
+}
+
+//: id -> human name, filled from the options endpoint at sign-in. Endpoints
+//  that return only a camera id can then still show an operator a place name.
+const cameraNames = new Map();
+
+// Departments arrive both as slugs ("government-catalogue") and as acronyms
+// ("RTO"). Lower-casing everything first turned RTO into "Rto", so existing
+// capitalisation is left alone and only an all-lowercase slug is tidied up.
+function prettyDepartment(value) {
+  const text = String(value || "").replace(/[-_]/g, " ").trim();
+  if (!text) return "";
+  // Catalogue-synced cameras carry "government-catalogue" as their department:
+  // a data-source name, not a department, and the feed tag already says it.
+  if (text.toLowerCase() === "government catalogue") return "";
+  if (text !== text.toLowerCase()) return text;
+  return text[0].toUpperCase() + text.slice(1);
+}
+
+function placeLabel(row) {
+  return [row.city, prettyDepartment(row.department)].filter(Boolean).join(" · ")
+    || "Location not recorded";
+}
+
+// ------------------------------------------------------------------ feeds --
+// Two sources, and they demonstrate different things. The own feed is
+// SYNTHETIC — frames this host generated — so it is labelled a test feed
+// everywhere it appears. An alert raised on it is a real alert from a real
+// persisted sighting, but it is not a live enforcement hit, and the interface
+// must not let anyone read it as one.
+const FEED = {
+  own: {
+    label: "Own test feed",
+    short: "Test feed",
+    detail: "Frames generated on this host with known number plates. Used to prove the plate-to-alert path end to end.",
+  },
+  government: {
+    label: "Government cameras",
+    short: "Government",
+    detail: "Authorised live camera streams. Used to detect, track and describe real vehicles.",
+  },
+};
+
+function feedOf(row) {
+  return row && row.feed === "own" ? "own" : "government";
+}
+
+// A camera registered by hand is neither the test feed nor a government
+// catalogue camera. `feed` has two values because the SEARCH filter has two
+// buckets; the label an operator reads comes from `origin`, which keeps the
+// three cases apart. Calling a locally added camera "Government" would be a
+// small lie printed on every row.
+const ORIGIN_TAG = {
+  own_feed: { key: "own", short: "Test feed" },
+  government_catalogue: { key: "government", short: "Government" },
+  local_registry: { key: "local", short: "Local registry" },
+};
+
+function feedTag(row) {
+  const byOrigin = row && ORIGIN_TAG[row.origin];
+  const key = byOrigin ? byOrigin.key : feedOf(row);
+  const short = byOrigin ? byOrigin.short : FEED[key].short;
+  return `<span class="feed-tag feed-tag-${key}">${escapeHtml(short)}</span>`;
+}
+
+// ----------------------------------------------------------------- badges --
+/** verified | estimated | unknown, always with its word, never colour alone. */
+function trustBadge(state) {
+  const label = { verified: "Verified", estimated: "Estimated", unknown: "Unknown" }[state] || "Unknown";
+  return `<span class="badge badge-${state || "unknown"}">${label}</span>`;
+}
+
+const PLATE_LABEL = {
+  ok: "Estimated",
+  plate_unreadable: "Plate unreadable",
+  plate_not_visible: "Plate not visible",
+  not_checked: "Not checked",
+};
+
+function plateCell(row) {
+  const state = row.plate_state || "not_checked";
+  if (state === "ok" && row.plate_text) {
+    return `<span class="plate-text">${escapeHtml(row.plate_text)}</span>
+            <span class="sub">${trustBadge("estimated")} not confirmed by a person</span>`;
+  }
+  const badgeKind = state === "not_checked" ? "unknown" : "unknown";
+  return `<span class="badge badge-${badgeKind}">${escapeHtml(PLATE_LABEL[state] || "Unknown")}</span>
+          ${row.plate_detail ? `<span class="sub">${escapeHtml(row.plate_detail)}</span>` : ""}`;
+}
+
+function reviewBadge(row) {
+  if (row.review_status === "verified") {
+    return `<span class="badge badge-verified">Reviewed</span>`;
+  }
+  return `<span class="badge badge-estimated">Review required</span>`;
+}
+
+// ------------------------------------------------------------- evidence ----
+// Evidence is fetched with the session header and shown from an object URL, so
+// no access token is ever placed in the DOM or in a link the browser may log.
+const objectUrls = new Set();
+
+function releaseImages() {
+  objectUrls.forEach((url) => URL.revokeObjectURL(url));
+  objectUrls.clear();
+}
+
+async function hydrateImages(root) {
+  const targets = root.querySelectorAll("img[data-evidence]");
+  await Promise.all(
+    Array.from(targets).map(async (image) => {
+      const rel = image.dataset.evidence;
+      image.removeAttribute("data-evidence");
+      try {
+        const response = await fetch(`/api/evidence?rel=${encodeURIComponent(rel)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error("unavailable");
+        const url = URL.createObjectURL(await response.blob());
+        objectUrls.add(url);
+        image.src = url;
+      } catch (_error) {
+        const placeholder = document.createElement("div");
+        placeholder.className = image.className.replace("thumb", "thumb-empty") || "thumb-empty";
+        placeholder.textContent = "Image unavailable";
+        image.replaceWith(placeholder);
+      }
+    })
+  );
+}
+
+function evidenceImg(path, alt, className = "thumb") {
+  if (!path) return `<div class="thumb-empty">No image</div>`;
+  return `<img class="${className}" alt="${escapeHtml(alt)}" data-evidence="${escapeHtml(path)}" />`;
+}
+
+// ================================================================= router ==
+const PAGE_TITLES = {
+  overview: ["Investigate", "Overview"],
+  search: ["Investigate", "Vehicle search"],
+  movement: ["Investigate", "Vehicle movement"],
+  alerts: ["Enforcement", "Alerts"],
+  watchlist: ["Enforcement", "Watchlist"],
+  cameras: ["Cameras", "Camera status"],
+};
+
+let currentPage = "overview";
+
+function showPage(page) {
+  if (!PAGE_TITLES[page]) page = "overview";
+  currentPage = page;
+  document.querySelectorAll(".navitem").forEach((button) => {
+    const on = button.dataset.page === page;
+    button.classList.toggle("is-current", on);
+    button.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  document.querySelectorAll(".page").forEach((section) => {
+    section.classList.toggle("hidden", section.dataset.page !== page);
+  });
+  const [crumb, title] = PAGE_TITLES[page];
+  el("pageCrumb").textContent = crumb;
+  el("pageTitle").textContent = title;
+  document.title = `${title} — Vehicle Investigation Console`;
+  el("content").scrollTo?.({ top: 0 });
+
+  if (page === "cameras") loadCameras();
+  if (page === "alerts") loadAlerts();
+  if (page === "watchlist") loadWatchlist();
+  if (page === "overview") loadOverview();
+  // Leaflet mis-measures a container that was display:none when it was built.
+  setTimeout(() => { maps.camera?.invalidateSize(); maps.movement?.invalidateSize(); }, 60);
+}
+
+// =================================================================== maps ==
+const MAP_AVAILABLE = typeof L !== "undefined" && L && typeof L.map === "function";
+const maps = { camera: null, movement: null };
+const layers = { cameraMarkers: null, movementMarkers: null, movementLines: null };
+
+function buildMap(containerId) {
+  if (!MAP_AVAILABLE) {
+    const host = el(containerId);
+    if (host && !host.querySelector(".map-note")) {
+      host.innerHTML = `<div class="map-note">Map library unavailable. Every list, search and
+        review function still works; coordinates are included in CSV exports.</div>`;
+    }
+    return null;
+  }
+  const map = L.map(containerId, { attributionControl: true }).setView([22.3, 71.2], 7);
+  const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "&copy; OpenStreetMap",
+    maxZoom: 18,
+  }).addTo(map);
+  let failures = 0;
+  tiles.on("tileerror", () => {
+    failures += 1;
+    if (failures !== 6) return;
+    const host = el(containerId);
+    if (host && !host.querySelector(".map-note")) {
+      const note = document.createElement("div");
+      note.className = "map-note";
+      note.textContent =
+        "Background map unavailable offline. Camera and sighting positions below are still plotted correctly.";
+      host.appendChild(note);
+    }
+  });
+  return map;
+}
+
+function ensureCameraMap() {
+  if (maps.camera || !MAP_AVAILABLE) return maps.camera;
+  maps.camera = buildMap("cameraMap");
+  layers.cameraMarkers = L.layerGroup().addTo(maps.camera);
+  return maps.camera;
+}
+
+function ensureMovementMap() {
+  if (maps.movement || !MAP_AVAILABLE) return maps.movement;
+  maps.movement = buildMap("movementMap");
+  layers.movementLines = L.layerGroup().addTo(maps.movement);
+  layers.movementMarkers = L.layerGroup().addTo(maps.movement);
+  return maps.movement;
+}
+
+// =============================================================== overview ==
+const TILE_NONE = "—";
+
+function tile(label, value, note, warn = false) {
+  const isNone = value === null || value === undefined || value === "";
+  return `<div class="tile">
+    <span class="tile-label">${escapeHtml(label)}</span>
+    <span class="tile-value${isNone ? " is-none" : ""}">${escapeHtml(isNone ? TILE_NONE : value)}</span>
+    ${note ? `<span class="tile-note${warn ? " is-warn" : ""}">${escapeHtml(note)}</span>` : ""}
+  </div>`;
+}
+
+let overviewLoaded = false;
+
+async function loadOverview() {
+  const tiles = el("overviewTiles");
+  if (!overviewLoaded) showLoading(tiles, 2);
+  try {
+    const data = await api("/api/ui/overview");
+    const cameras = data.cameras || {};
+    const vehicles = data.vehicles || {};
+    tiles.innerHTML = [
+      tile("Cameras monitoring", cameras.monitoring,
+        `${cameras.total ?? 0} camera${cameras.total === 1 ? "" : "s"} registered`),
+      tile("Cameras available", cameras.available,
+        cameras.not_checked
+          ? `${cameras.not_checked} not checked yet`
+          : "All registered cameras have been checked",
+        Boolean(cameras.not_checked)),
+      tile("Vehicles seen (24h)", vehicles.observations,
+        data.last_observation_at_ist
+          ? `Last at ${String(data.last_observation_at_ist).replace(" IST", "")}`
+          : "No vehicles recorded in this window"),
+      tile("Awaiting review", vehicles.awaiting_review,
+        "Colour and type need a person to confirm them", Boolean(vehicles.awaiting_review)),
+      tile("Open alerts", data.alerts_open,
+        `${data.watchlist_active ?? 0} plate${data.watchlist_active === 1 ? "" : "s"} on the watchlist`,
+        Boolean(data.alerts_open)),
+    ].join("");
+
+    const chip = el("plateChip");
+    chip.textContent = `Plate reading: ${data.plate_recognition_enabled ? "on" : "off"}`;
+    chip.className = `chip ${data.plate_recognition_enabled ? "is-on" : "is-off"}`;
+    chip.title = data.plate_recognition_enabled
+      ? "Number plates are read where the image allows it."
+      : "Number plates are not being read. Vehicles are still detected and recorded.";
+
+    const badge = el("navAlertCount");
+    badge.textContent = String(data.alerts_open || "");
+    badge.classList.toggle("hidden", !data.alerts_open);
+    renderFeeds(data.feeds);
+    overviewLoaded = true;
+  } catch (error) {
+    // Figures that were once correct are left standing; the banner above says
+    // they are stale. Replacing them with an error would throw away the last
+    // known state for no gain.
+    if (!overviewLoaded) showError(tiles, error, "Try again");
     return;
   }
-  el.className = "";
-  el.innerHTML = rows.map(vehicleObservationCard).join("");
+  loadOverviewRecent();
+  loadOverviewAlerts();
 }
 
-function vehicleObservationCard(row) {
-  const image = row.evidence_path ? `<img src="${evidenceUrl(row.evidence_path)}" alt="vehicle evidence" />` : "";
-  return `<article class="card observation-card">${image}
-    <div class="vehicle-grid">
-      <div><span class="k">Vehicle type</span><b>${row.vehicle_type || "unknown"}</b> <span class="muted">${Number(row.type_confidence || 0).toFixed(2)}</span></div>
-      <div><span class="k">Colour</span><b>${row.vehicle_color || "unknown"}</b> <span class="muted">${Number(row.color_confidence || 0).toFixed(2)}</span></div>
-      <div><span class="k">Camera</span>${row.camera_id} ${row.city ? `· ${row.city}` : ""}</div>
-      <div><span class="k">Observed</span>${row.first_seen_at_ist || formatWhen(row.first_seen_at)}</div>
-    </div></article>`;
+// Both paths, side by side, each with its own counts and its own next action.
+// Every figure comes from /api/ui/overview; a source that produced nothing says
+// so rather than borrowing the other's numbers.
+function renderFeeds(feeds) {
+  const node = el("feedPanel");
+  if (!feeds) { showEmpty(node, "Feed figures unavailable"); return; }
+  const hours = feeds.window_hours || 24;
+
+  const card = (key, actionsHtml) => {
+    const f = feeds[key] || {};
+    const c = f.cameras || {};
+    const meta = FEED[key];
+    const rows = [
+      ["Cameras", c.total],
+      ["Available now", c.available],
+      key === "government" ? ["Unreachable", c.unreachable] : null,
+      c.not_checked ? ["Not checked", c.not_checked] : null,
+      ["Monitoring", c.monitoring],
+      [`Vehicles (${hours}h)`, f.observations],
+      [`Plates read (${hours}h)`, f.sightings],
+      ["Open alerts", f.alerts_open],
+    ].filter(Boolean);
+    return `<article class="feedcard feedcard-${key}">
+      <div class="feedcard-head">
+        <h3>${escapeHtml(meta.label)}</h3>
+        ${feedTag({ feed: key })}
+      </div>
+      <p class="card-meta">${escapeHtml(meta.detail)}</p>
+      <dl class="feedstats">${rows.map(([label, value]) => `
+        <div><dt>${escapeHtml(label)}</dt><dd>${value == null ? "—" : escapeHtml(value)}</dd></div>`).join("")}
+      </dl>
+      <div class="card-actions">${actionsHtml}</div>
+    </article>`;
+  };
+
+  node.innerHTML =
+    card("government", `
+      <button class="btn-secondary" data-feed-action="check">Check connections</button>
+      <button class="btn-secondary" data-feed-action="monitor">Start monitoring available</button>
+      <button class="btn-quiet" data-feed-view="government">View vehicles</button>`)
+    + card("own", `
+      <button class="btn-secondary" data-feed-action="analyse">Analyse own feed</button>
+      <button class="btn-quiet" data-feed-view="own">View vehicles</button>`);
+
+  node.querySelectorAll("[data-feed-view]").forEach((button) => {
+    button.addEventListener("click", () => {
+      showPage("search");
+      el("fFeed").value = button.dataset.feedView;
+      setRange(24);
+      withBusy(el("btnSearch"), () => runSearch());
+    });
+  });
+  node.querySelector('[data-feed-action="check"]').addEventListener("click", (e) => checkConnections(e.currentTarget));
+  node.querySelector('[data-feed-action="monitor"]').addEventListener("click", (e) => startAvailable(e.currentTarget));
+  node.querySelector('[data-feed-action="analyse"]').addEventListener("click", (e) => analyseOwnFeed(e.currentTarget));
 }
 
-function datetimeLocalValue(date) {
+// `/api/analyze-active` runs exactly the own-feed sources (image_dir / file),
+// so this is the whole own-feed demonstration in one action.
+function analyseOwnFeed(button) {
+  return withBusy(button, async () => {
+    try {
+      const result = await api("/api/analyze-active", { method: "POST" });
+      const ran = result.ran || 0;
+      toast(ran
+        ? `Analysed ${ran} own-feed source${ran === 1 ? "" : "s"}. Any watchlist match appears under Alerts.`
+        : "No own-feed sources are configured on this host.", ran ? "ok" : "warn");
+      loadOverview();
+      loadAlerts();
+    } catch (error) {
+      toast(errorText(error), "bad");
+    }
+  });
+}
+
+async function loadOverviewRecent() {
+  const node = el("overviewRecent");
+  showLoading(node, 3);
+  const end = new Date();
+  const start = new Date(end.getTime() - 24 * 3600 * 1000);
+  try {
+    const data = await api(`/api/investigations/vehicles?${new URLSearchParams({
+      start: start.toISOString(), end: end.toISOString(), limit: "6", sort: "desc",
+    })}`);
+    const rows = data.observations || [];
+    if (!rows.length) {
+      showEmpty(node, "No vehicles recorded in the last 24 hours",
+        "Start monitoring a camera, or analyse recorded footage from the Cameras page.");
+      return;
+    }
+    // A compact list, not the results table: this panel is half the width of
+    // the page and a squeezed eight-column table clips the trust badges, which
+    // are the part that must never be hard to read.
+    node.innerHTML = `<ul class="feed">${rows.map((row) => `
+      <li class="feed-item is-clickable" data-observation="${row.id}" tabindex="0" role="button">
+        ${evidenceImg(row.evidence_path, `Vehicle seen at ${cameraLabel(row)}`)}
+        <div class="feed-text">
+          <span class="feed-title">${escapeHtml(cameraLabel(row))}</span>
+          <span class="sub">${escapeHtml(formatTime(row, "first_seen_at", "first_seen_at_ist"))} · ${
+            escapeHtml(placeLabel(row))}</span>
+          <span class="feed-tags">
+            <span>${escapeHtml(row.color_display || "Unknown")} ${trustBadge(row.color_state)}</span>
+            <span>${plateBadgeOnly(row)}</span>
+          </span>
+        </div>
+      </li>`).join("")}</ul>`;
+    wireObservationTable(node);
+    await hydrateImages(node);
+  } catch (error) {
+    showError(node, error, "Try again");
+  }
+}
+
+function plateBadgeOnly(row) {
+  const state = row.plate_state || "not_checked";
+  if (state === "ok" && row.plate_text) {
+    return `<span class="plate-text">${escapeHtml(row.plate_text)}</span> ${trustBadge("estimated")}`;
+  }
+  return `<span class="badge badge-unknown">${escapeHtml(PLATE_LABEL[state] || "Unknown")}</span>`;
+}
+
+async function loadOverviewAlerts() {
+  const node = el("overviewAlerts");
+  showLoading(node, 2);
+  try {
+    const alerts = (await api("/api/alerts")).filter((a) => a.status === "new");
+    if (!alerts.length) {
+      showEmpty(node, "No open alerts", "Watchlist matches will appear here as soon as they are raised.");
+      return;
+    }
+    node.innerHTML = `<div class="cards">${alerts.slice(0, 4).map(alertCard).join("")}</div>`;
+    await hydrateImages(node);
+    wireAlertActions(node);
+  } catch (error) {
+    showError(node, error, "Try again");
+  }
+}
+
+// ================================================================= search ==
+let options = { vehicle_types: [], vehicle_colors: [], cameras: [] };
+let lastSearchQuery = null;
+// One screenful at a time. Dropping 200 rows into the page buries the filters
+// and pulls 200 evidence images the operator has not asked to see.
+const PAGE_SIZE = 50;
+let searchOffset = 0;
+let searchRows = [];
+
+function datetimeLocal(date) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function setInvestigationWindow(hours) {
+function setRange(hours) {
   const end = new Date();
-  const start = new Date(end.getTime() - hours * 60 * 60 * 1000);
-  document.getElementById("invStart").value = datetimeLocalValue(start);
-  document.getElementById("invEnd").value = datetimeLocalValue(end);
+  el("fEnd").value = datetimeLocal(end);
+  el("fStart").value = datetimeLocal(new Date(end.getTime() - hours * 3600 * 1000));
 }
 
-async function loadInvestigationOptions() {
-  const data = await j("/api/vehicle-observation-options");
-  const type = document.getElementById("invType");
-  const color = document.getElementById("invColor");
-  const camera = document.getElementById("invCamera");
-  if (!type || !color || !camera) return;
-  type.innerHTML = '<option value="">Any type</option>' + (data.vehicle_types || []).map((v) => `<option value="${v}">${v.replaceAll("_", " ")}</option>`).join("");
-  color.innerHTML = '<option value="">Any colour</option>' + (data.vehicle_colors || []).map((v) => `<option value="${v}">${v}</option>`).join("");
-  camera.innerHTML = '<option value="">Any camera</option>' + (data.cameras || []).map((c) => `<option value="${c.id}">${c.id} · ${c.name || c.city || ""}</option>`).join("");
+async function loadSearchOptions() {
+  try {
+    const data = await api("/api/vehicle-observation-options");
+    options = data;
+    (data.cameras || []).forEach((c) => cameraNames.set(c.id, c.name || c.id));
+    const supportedTypes = new Set(data.supported_vehicle_types || []);
+    const supportedColors = new Set(data.supported_vehicle_colors || []);
+
+    // Every recorded value stays searchable so older records remain findable,
+    // but anything this system cannot recognise on its own is labelled, rather
+    // than being offered as though the system could find it for you.
+    const render = (values, supported, suffix) =>
+      values.filter((v) => v !== "unknown").map((v) =>
+        `<option value="${escapeHtml(v)}">${escapeHtml(titleCase(v))}${
+          supported.has(v) ? "" : ` ${suffix}`}</option>`).join("");
+
+    el("fType").innerHTML = '<option value="">Any type</option>'
+      + render(data.vehicle_types || [], supportedTypes, "(manual records only)");
+    el("fColor").innerHTML = '<option value="">Any colour</option>'
+      + render(data.vehicle_colors || [], supportedColors, "(manual records only)");
+    el("fCamera").innerHTML = '<option value="">All cameras</option>'
+      + (data.cameras || []).map((c) =>
+        `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name || c.id)}${
+          c.city ? ` — ${escapeHtml(c.city)}` : ""}</option>`).join("");
+
+    setFieldNote("fTypeNote", data.type_filter?.warning);
+    setFieldNote("fColorNote", data.color_filter?.warning);
+  } catch (_error) {
+    setFieldNote("fTypeNote", "Filter options could not be loaded. Searching by time and camera still works.");
+  }
 }
 
-async function searchVehicleObservations() {
-  const start = document.getElementById("invStart").value;
-  const end = document.getElementById("invEnd").value;
-  if (!start || !end) return;
-  const q = new URLSearchParams({ start: new Date(start).toISOString(), end: new Date(end).toISOString(), limit: "100", sort: "asc" });
-  const type = document.getElementById("invType").value;
-  const color = document.getElementById("invColor").value;
-  const camera = document.getElementById("invCamera").value;
-  const conf = document.getElementById("invConfidence").value;
-  if (type) q.set("vehicle_type", type);
-  if (color) q.set("vehicle_color", color);
-  if (camera) q.set("camera_id", camera);
-  if (conf) q.set("min_confidence", conf);
-  const data = await j(`/api/investigations/vehicles?${q}`);
-  const out = document.getElementById("investigateOut");
-  const results = document.getElementById("investigationResults");
-  out.className = "card";
-  out.innerHTML = `<b>${data.total || 0} matching observation(s)</b> · ${(Object.keys(data.camera_counts || {}).length)} camera(s)<br><span class="muted">${data.disclaimer}</span>`;
-  results.innerHTML = (data.observations || []).map(vehicleObservationCard).join("") || '<div class="card muted">No matching observations in this time range.</div>';
-  markers.clearLayers(); links.clearLayers(); routes.clearLayers();
-  const points = [];
-  (data.observations || []).forEach((row) => {
-    if (row.lat == null || row.lng == null) return;
-    points.push([row.lat, row.lng]);
-    L.circleMarker([row.lat, row.lng], { radius: 7, color: "#2c5282", fillOpacity: 0.85 })
-      .bindPopup(`${row.vehicle_type} · ${row.vehicle_color}<br>${row.camera_id}<br>${row.first_seen_at_ist || row.first_seen_at}`)
-      .addTo(markers);
+function setFieldNote(id, text) {
+  const node = el(id);
+  if (!node) return;
+  node.textContent = text || "";
+  node.className = text ? "field-note is-warn" : "field-note";
+}
+
+function searchQuery() {
+  const start = el("fStart").value;
+  const end = el("fEnd").value;
+  if (!start || !end) return null;
+  if (new Date(start) > new Date(end)) return "invalid";
+  const query = new URLSearchParams({
+    start: new Date(start).toISOString(),
+    end: new Date(end).toISOString(),
+    limit: String(PAGE_SIZE),
+    sort: "desc",
   });
-  if (points.length) map.fitBounds(points, { padding: [36, 36] });
-  document.getElementById("dlInvestigationCsv").href = `/api/investigations/vehicles/export.csv?${q}&token=${encodeURIComponent(TOKEN)}`;
+  const add = (id, key) => { const v = el(id).value; if (v) query.set(key, v); };
+  add("fFeed", "feed");
+  add("fCamera", "camera_id");
+  add("fColor", "vehicle_color");
+  add("fType", "vehicle_type");
+  add("fPlate", "plate_state");
+  add("fReview", "review");
+  return query;
 }
 
-async function loadPlateRecognitionSettings() {
-  const el = document.getElementById("plateRecognitionSettings");
-  if (!el) return;
-  const data = await j("/api/settings/recognition");
-  el.className = "card";
-  el.innerHTML = `<b>Number-plate recognition: ${data.enabled ? "ON" : "OFF"}</b><br><span class="muted">${data.effective_camera_count || 0} camera(s) currently effective. When off, vehicle type and colour detection continues and no new plate alerts are created.</span>`;
-  const button = document.getElementById("btnTogglePlateRecognition");
-  if (button) button.textContent = data.enabled ? "Turn number-plate recognition off" : "Turn number-plate recognition on";
-  return data;
-}
-
-async function loadLiveSightings() {
-  const el = document.getElementById("liveSightings");
-  if (!el) return;
-  const rows = await j("/api/sightings?limit=25");
-  if (!rows.length) {
-    el.className = "card muted";
-    el.textContent = "No persisted sightings yet.";
+async function runSearch(append = false) {
+  const query = searchQuery();
+  const results = el("searchResults");
+  const meta = el("searchMeta");
+  const warnings = el("searchWarnings");
+  if (!query) {
+    showEmpty(results, "Choose a time range", "Pick a start and end time, or use one of the quick ranges.");
     return;
   }
-  el.className = "";
-  el.innerHTML = rows
-    .slice()
-    .reverse()
-    .map(
-      (s) =>
-        `<div class="card"><b>${s.plate_raw || s.plate_norm}</b> · ${s.camera_id} · ${s.syntax_ok ? "syntax ok" : "not a valid plate"}<div class="muted">${s.source_time_ist || formatWhen(s.source_time)} · ${s.model_id || ""} · conf ${(s.confidence || 0).toFixed(2)}</div></div>`
-    )
-    .join("");
+  if (query === "invalid") {
+    showError(results, new ApiError("The start time must be before the end time.", 400));
+    return;
+  }
+  if (!append) { searchOffset = 0; searchRows = []; showLoading(results, 6); warnings.innerHTML = ""; }
+  query.set("offset", String(searchOffset));
+  lastSearchQuery = query;
+  try {
+    const data = await api(`/api/investigations/vehicles?${query}`);
+    const page = data.observations || [];
+    searchRows = append ? searchRows.concat(page) : page;
+    if (!append) {
+      warnings.innerHTML = (data.search_warnings || [])
+        .map((w) => `<div class="warning-strip"><span aria-hidden="true">⚠</span><span>${escapeHtml(w)}</span></div>`)
+        .join("");
+    }
+    // The plate filter is applied to each page after it is fetched, so the
+    // wording has to say what was actually counted rather than implying the
+    // whole range was filtered.
+    const total = data.total || 0;
+    const scanned = Math.min(searchOffset + PAGE_SIZE, total);
+    const cameras = Object.keys(data.camera_counts || {}).length;
+    meta.textContent = !searchRows.length ? "" : el("fPlate").value
+      ? `${searchRows.length} match${searchRows.length === 1 ? "" : "es"} in the ${scanned} most recent of ${total} records`
+      : `Showing ${searchRows.length} of ${total} vehicle${total === 1 ? "" : "s"}`
+        + ` across ${cameras} camera${cameras === 1 ? "" : "s"}, most recent first`;
+    const more = scanned < total;
+    if (!searchRows.length && !more) {
+      // The own feed is a plate-reading source: it produces sightings and
+      // alerts, not tracked vehicle observations. Telling someone to "widen the
+      // time range" when no time range would ever help is a dead end.
+      showEmpty(results, "No vehicles match this search",
+        el("fFeed").value === "own"
+          ? "The own test feed reads number plates rather than tracking vehicles. Its results appear under Alerts and in the watchlist."
+          : "Try a wider time range, or clear the colour and plate filters.");
+      return;
+    }
+    results.innerHTML = (searchRows.length
+        ? observationTable(searchRows)
+        : `<div class="state"><strong>Nothing matched in the ${scanned} records checked so far</strong>
+             <p>Keep looking further back, or clear the plate filter.</p></div>`)
+      + (more ? `<div class="state"><button class="btn-secondary" id="btnMore">Check ${
+          Math.min(PAGE_SIZE, total - scanned)} older records</button></div>` : "");
+    wireObservationTable(results);
+    el("btnMore")?.addEventListener("click", (event) => withBusy(event.currentTarget, () => {
+      searchOffset += PAGE_SIZE;
+      return runSearch(true);
+    }));
+    await hydrateImages(results);
+  } catch (error) {
+    showError(results, error, "Try again");
+  }
 }
 
-async function loadRecognitionDiagnostics() {
-  const summaryEl = document.getElementById("recognitionSummary");
-  const rowsEl = document.getElementById("recognitionAttempts");
-  if (!summaryEl || !rowsEl) return;
-  const data = await j("/api/recognition/diagnostics?limit=30");
-  const summary = data.summary || {};
-  const reasons = summary.reason_counts || {};
-  summaryEl.className = "card";
-  summaryEl.textContent = `${summary.attempt_count || 0} attempts · reasons ${Object.entries(reasons).map(([k, v]) => `${k}:${v}`).join(", ") || "none"}`;
-  rowsEl.innerHTML = (data.attempts || []).map((a) => {
-    const isLocalizedPlate = a.detector === "fast_alpr" && a.reason_code !== "no_plate_localized";
-    const crop = [
-      isLocalizedPlate && a.evidence_path ? `<figure><figcaption>Native plate crop</figcaption><img src="${evidenceUrl(a.evidence_path)}" alt="native plate crop" /></figure>` : "",
-      a.context_evidence_path ? `<figure><figcaption>${isLocalizedPlate ? "Detector context" : "Vehicle context — no plate localized"}</figcaption><img src="${evidenceUrl(a.context_evidence_path)}" alt="boxed detector context" /></figure>` : "",
-    ].join("");
-    const confs = (a.character_confidences || []).map((v) => Number(v).toFixed(2)).join(" ");
-    const verdict = a.accepted ? "accepted candidate" : (a.syntax_ok ? "review (syntax ok)" : "review/rejected");
-    return `<div class="card">${crop}<b>${a.plate_norm || "empty"}</b> · ${a.reason_code} · ${a.camera_id}<div class="muted">track ${a.track_id || "—"} · ${a.detector || "—"} / ${a.recognizer || "—"} · conf ${Number(a.confidence || 0).toFixed(2)} · ${Number(a.latency_ms || 0).toFixed(1)} ms<br>native ${(a.native_size || []).join("×") || "—"} · chars ${confs || "—"} · ${verdict}</div></div>`;
-  }).join("") || '<div class="card muted">No candidate attempts have been persisted.</div>';
+function observationTable(rows) {
+  return `<div class="table-wrap"><table>
+    <caption class="visually-hidden">Vehicle observations</caption>
+    <thead><tr>
+      <th scope="col">Vehicle</th>
+      <th scope="col">Camera</th>
+      <th scope="col">Seen</th>
+      <th scope="col">Type</th>
+      <th scope="col">Colour</th>
+      <th scope="col">Number plate</th>
+      <th scope="col">Review</th>
+      <th scope="col"><span class="visually-hidden">Actions</span></th>
+    </tr></thead>
+    <tbody>${rows.map(observationRow).join("")}</tbody>
+  </table></div>`;
+}
+
+function observationRow(row) {
+  const first = formatTime(row, "first_seen_at", "first_seen_at_ist");
+  const last = formatTime(row, "last_seen_at", "last_seen_at_ist");
+  return `<tr class="is-clickable" data-observation="${row.id}" tabindex="0">
+    <td>${evidenceImg(row.evidence_path, `Vehicle seen at ${cameraLabel(row)}`)}</td>
+    <td>${escapeHtml(cameraLabel(row))}<span class="sub">${feedTag(row)} ${escapeHtml(placeLabel(row))}</span></td>
+    <td class="num">${escapeHtml(first)}<span class="sub">${
+      last && last !== first ? `to ${escapeHtml(last)}` : "single frame"}</span></td>
+    <td>${escapeHtml(row.type_display || "Unknown")} ${trustBadge(row.type_state)}</td>
+    <td>${escapeHtml(row.color_display || "Unknown")} ${trustBadge(row.color_state)}</td>
+    <td>${plateCell(row)}</td>
+    <td>${reviewBadge(row)}</td>
+    <td><button class="btn-quiet" data-open="${row.id}">Open</button></td>
+  </tr>`;
+}
+
+function wireObservationTable(root) {
+  root.querySelectorAll("[data-observation]").forEach((tr) => {
+    const open = () => openObservation(tr.dataset.observation);
+    tr.addEventListener("click", (event) => {
+      if (event.target.closest("button") && !event.target.closest("[data-open]")) return;
+      open();
+    });
+    tr.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+    });
+  });
+}
+
+// ====================================================== observation detail =
+let openObservationId = null;
+
+async function openObservation(id) {
+  openObservationId = id;
+  const dialog = el("detailDialog");
+  const body = el("detailBody");
+  showLoading(body, 4);
+  if (!dialog.open) dialog.showModal();
+  try {
+    const row = await api(`/api/vehicle-observations/${encodeURIComponent(id)}`);
+    el("detailTitle").textContent = `Vehicle at ${cameraLabel(row)}`;
+    body.innerHTML = observationDetail(row);
+    await hydrateImages(body);
+    wireReviewForm(body, row);
+  } catch (error) {
+    showError(body, error);
+  }
+}
+
+function observationDetail(row) {
+  const first = formatTime(row, "first_seen_at", "first_seen_at_ist");
+  const last = formatTime(row, "last_seen_at", "last_seen_at_ist");
+  // Only ever attached to the attribute the person actually confirmed.
+  const verifiedLine = row.verified_by
+    ? `<span class="sub">confirmed by ${escapeHtml(row.verified_by)}${
+        row.verified_at ? ` · ${escapeHtml(formatTime(row, "verified_at", ""))}` : ""}</span>`
+    : "";
+
+  return `
+    <div class="evidence-pair">
+      <figure>
+        ${evidenceImg(row.evidence_path, "Best view of this vehicle", "")}
+        <figcaption>Best available view of the vehicle, chosen automatically from the frames it appeared in.</figcaption>
+      </figure>
+      <figure>
+        ${evidenceImg(row.context_evidence_path, "Surrounding camera frame", "")}
+        <figcaption>The surrounding frame, for context. Full video remains with the department that owns the camera.</figcaption>
+      </figure>
+    </div>
+
+    <dl class="datalist">
+      <dt>Camera</dt><dd>${escapeHtml(cameraLabel(row))}<span class="sub">${escapeHtml(placeLabel(row))}</span></dd>
+      <dt>Feed</dt><dd>${feedTag(row)}<span class="sub">${escapeHtml(FEED[feedOf(row)].detail)}</span></dd>
+      <dt>First seen</dt><dd>${escapeHtml(first)}</dd>
+      <dt>Last seen</dt><dd>${escapeHtml(last)}</dd>
+      <dt>Vehicle type</dt><dd>${escapeHtml(row.type_display || "Unknown")} ${trustBadge(row.type_state)} ${
+        row.type_state === "verified" ? verifiedLine : ""}</dd>
+      <dt>Colour</dt><dd>${escapeHtml(row.color_display || "Unknown")} ${trustBadge(row.color_state)} ${
+        row.color_state === "verified" ? verifiedLine : ""}</dd>
+      <dt>Number plate</dt><dd>${plateCell(row)}</dd>
+      <dt>Review</dt><dd>${reviewBadge(row)}</dd>
+      <dt>Reference</dt><dd><span class="plate-text">OBS-${escapeHtml(String(row.id).padStart(6, "0"))}</span></dd>
+    </dl>
+
+    ${row.type_note || row.color_note
+      ? `<div class="warning-strip"><span aria-hidden="true">⚠</span><span>${
+          escapeHtml(row.type_note || row.color_note)}</span></div>`
+      : ""}
+
+    <div class="warning-strip">
+      <span aria-hidden="true">⚠</span>
+      <span>Colour is an estimate produced automatically and needs a person to confirm it.
+      Automatic vehicle type is not in operational use and is shown as Unknown until verified.
+      This record describes one passage past one camera; it does not identify a vehicle.</span>
+    </div>
+
+    <form class="review-form" id="reviewForm">
+      <h3>Record your verdict</h3>
+      <p class="field-note">What you save here replaces the automatic value everywhere it is shown and is recorded against your token. The original automatic reading is kept.</p>
+      <div class="review-grid">
+        <div class="field">
+          <label for="rType">Vehicle type</label>
+          <select id="rType">
+            <option value="">Leave unchanged</option>
+            ${reviewOptions(options.vehicle_types, options.supported_vehicle_types, row.verified_vehicle_type)}
+          </select>
+        </div>
+        <div class="field">
+          <label for="rColor">Colour</label>
+          <select id="rColor">
+            <option value="">Leave unchanged</option>
+            ${reviewOptions(options.vehicle_colors, options.supported_vehicle_colors, row.verified_vehicle_color)}
+          </select>
+        </div>
+        <div class="field field-actions">
+          <button type="submit" id="btnSaveReview">Save verdict</button>
+        </div>
+      </div>
+    </form>`;
+}
+
+function reviewOptions(values, supported, selected) {
+  const canPredict = new Set(supported || []);
+  const list = (values || []).filter((v) => v !== "unknown");
+  const group = (label, items) => items.length
+    ? `<optgroup label="${label}">${items.map((v) =>
+        `<option value="${escapeHtml(v)}"${v === selected ? " selected" : ""}>${escapeHtml(titleCase(v))}</option>`
+      ).join("")}</optgroup>`
+    : "";
+  return group("Recognised automatically", list.filter((v) => canPredict.has(v)))
+    + group("Recorded by a person only", list.filter((v) => !canPredict.has(v)));
+}
+
+function wireReviewForm(root, row) {
+  const form = root.querySelector("#reviewForm");
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const type = root.querySelector("#rType").value;
+    const color = root.querySelector("#rColor").value;
+    if (!type && !color) {
+      toast("Choose a vehicle type or a colour before saving.", "warn");
+      return;
+    }
+    const parts = [type ? `type to ${titleCase(type)}` : "", color ? `colour to ${titleCase(color)}` : ""]
+      .filter(Boolean).join(" and ");
+    const ok = await confirmAction(
+      `Set the ${parts} for this vehicle? This becomes the confirmed value and is recorded against you.`,
+      "Save verdict"
+    );
+    if (!ok) return;
+    await withBusy(root.querySelector("#btnSaveReview"), async () => {
+      try {
+        const body = {};
+        if (type) body.vehicle_type = type;
+        if (color) body.vehicle_color = color;
+        await api(`/api/vehicle-observations/${encodeURIComponent(row.id)}/review`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        toast("Verdict saved.", "ok");
+        await openObservation(row.id);
+        if (currentPage === "search" && lastSearchQuery) runSearch();
+        if (currentPage === "overview") loadOverview();
+      } catch (error) {
+        toast(errorText(error), "bad");
+      }
+    });
+  });
+}
+
+// =============================================================== movement ==
+async function runMovement() {
+  const plate = el("mPlate").value.trim();
+  const list = el("movementList");
+  if (!plate) return;
+  ensureMovementMap();
+  showLoading(list, 4);
+  const query = new URLSearchParams({ routes: "true" });
+  const day = el("mDay").value;
+  if (day) query.set("day", day);
+  try {
+    const data = await api(`/api/vehicles/${encodeURIComponent(plate)}?${query}`);
+    const sightings = data.sightings || [];
+    if (!sightings.length) {
+      showEmpty(list, `No sightings for ${plate}`,
+        day ? "Try another date, or leave the date blank for the last 24 hours."
+            : "This plate has not been recorded by any camera in the last 24 hours.");
+      drawMovement([]);
+      return;
+    }
+    // A camera reading the same plate frame after frame is one passage, not
+    // forty sightings. Consecutive readings at one camera are shown as a single
+    // stop with its time span, which is what an investigator actually follows.
+    const stops = groupPassages(sightings);
+    list.innerHTML = `<p class="panel-meta" style="margin-bottom:12px">${
+      stops.length} stop${stops.length === 1 ? "" : "s"} from ${sightings.length} reading${
+      sightings.length === 1 ? "" : "s"}</p>
+      <ol class="cards">${stops.map((stop, index) => `
+      <li class="card">
+        <div class="card-head">
+          <span class="card-title">${index + 1}. ${escapeHtml(cameraLabel(stop.first))}</span>
+          ${stop.count > 1 ? `<span class="badge badge-unknown badge-plain">${stop.count} readings</span>` : ""}
+        </div>
+        <p class="card-meta">${escapeHtml(formatTime(stop.first, "source_time", "source_time_ist"))}${
+          stop.count > 1 ? ` to ${escapeHtml(formatTime(stop.last, "source_time", "source_time_ist"))}` : ""}</p>
+        <p class="card-meta">${escapeHtml(placeLabel(stop.first))}</p>
+      </li>`).join("")}</ol>`;
+    drawMovement(stops.map((stop) => ({ ...stop.first, _count: stop.count })), data.possible_routes);
+  } catch (error) {
+    showError(list, error, "Try again");
+  }
+}
+
+function groupPassages(sightings) {
+  const stops = [];
+  sightings.forEach((s) => {
+    const previous = stops[stops.length - 1];
+    if (previous && previous.first.camera_id === s.camera_id) {
+      previous.last = s;
+      previous.count += 1;
+      return;
+    }
+    stops.push({ first: s, last: s, count: 1 });
+  });
+  return stops;
+}
+
+function drawMovement(sightings, routes = []) {
+  if (!maps.movement) return;
+  layers.movementMarkers.clearLayers();
+  layers.movementLines.clearLayers();
+  const points = [];
+  // Road-matched paths between consecutive stops. A road the vehicle COULD
+  // have taken, never one it was observed taking, so it is drawn under the
+  // markers and labelled as such wherever it is touched.
+  (routes || []).forEach((route) => {
+    if (!route.path || route.path.length < 2) return;
+    const guessed = route.provider === "fallback_straight";
+    L.polyline(route.path, {
+      color: guessed ? "#6B788C" : "#2A5B99",
+      weight: 4, opacity: 0.7, dashArray: guessed ? "5 8" : null,
+    })
+      .bindPopup(`${escapeHtml(cameraNames.get(route.from_camera) || route.from_camera || "")} → ${
+        escapeHtml(cameraNames.get(route.to_camera) || route.to_camera || "")}<br>${
+        guessed ? "Straight line — no road match available." : "A road route that was possible in the time available. Not the route taken."}`)
+      .addTo(layers.movementLines);
+  });
+  sightings.forEach((s, index) => {
+    if (s.lat == null || s.lng == null) return;
+    points.push([s.lat, s.lng]);
+    L.circleMarker([s.lat, s.lng], { radius: 9, color: "#1C4173", fillColor: "#2A5B99", fillOpacity: 0.9, weight: 2 })
+      .bindPopup(`<strong>${index + 1}. ${escapeHtml(cameraLabel(s))}</strong><br>${
+        escapeHtml(formatTime(s, "source_time", "source_time_ist"))}${
+        s._count > 1 ? `<br>${s._count} readings at this camera` : ""}`)
+      .addTo(layers.movementMarkers);
+  });
+  if (points.length > 1) {
+    L.polyline(points, { color: "#C4A24B", weight: 3, dashArray: "8 7" })
+      .bindPopup("Inferred from the order of sightings. Not a recorded route.")
+      .addTo(layers.movementLines);
+  }
+  if (points.length) maps.movement.fitBounds(points, { padding: [40, 40], maxZoom: 14 });
+}
+
+// ================================================================= alerts ==
+function alertCard(a) {
+  const priority = (a.priority || "unset").toLowerCase();
+  const label = { high: "High", medium: "Medium", low: "Low" }[priority] || "Priority not set";
+  return `<article class="card is-alert">
+    <div class="card-head">
+      <span class="card-title plate-text">${escapeHtml(a.plate_norm)}</span>
+      <span class="prio prio-${escapeHtml(priority)}">${escapeHtml(label)}</span>
+    </div>
+    ${evidenceImg(a.evidence_path, `Vehicle matching ${a.plate_norm}`, "thumb")}
+    <p class="card-meta">
+      ${feedTag(a)} ${escapeHtml(cameraLabel(a))} · ${escapeHtml(formatTime(a, "source_time", "source_time_ist"))}
+    </p>
+    <p class="card-meta">${escapeHtml(titleCase(a.purpose) || "Watchlist match")} · ${escapeHtml(titleCase(a.status))}</p>
+    <p class="card-meta">Raised by an exact match to a watchlist plate. Vehicle type and colour on this record are automatic estimates and do not confirm identity.</p>
+    ${feedOf(a) === "own"
+      ? `<p class="card-meta is-warn">This camera is the own test feed — frames generated on this host with
+         known plates. The match is real, but the vehicle is not.</p>`
+      : ""}
+    <div class="card-actions">
+      <button class="btn-secondary" data-alert="${a.id}" data-status="acknowledged">Acknowledge</button>
+      <button data-alert="${a.id}" data-status="confirmed">Confirm match</button>
+      <button class="btn-secondary" data-alert="${a.id}" data-status="rejected">Not a match</button>
+    </div>
+  </article>`;
+}
+
+function wireAlertActions(root) {
+  root.querySelectorAll("[data-alert]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const status = button.dataset.status;
+      const wording = {
+        acknowledged: "Acknowledge this alert?",
+        confirmed: "Confirm this is the watchlist vehicle? This is recorded against you.",
+        rejected: "Record this as not a match? This is recorded against you.",
+      }[status];
+      if (status !== "acknowledged" && !(await confirmAction(wording, "Confirm"))) return;
+      await withBusy(button, async () => {
+        try {
+          await api(`/api/alerts/${encodeURIComponent(button.dataset.alert)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ status }),
+          });
+          toast("Alert updated.", "ok");
+          loadAlerts();
+          loadOverview();
+        } catch (error) {
+          toast(errorText(error), "bad");
+        }
+      });
+    });
+  });
 }
 
 async function loadAlerts() {
-  await loadLiveVehicles();
-  await loadLiveSightings();
-  const alerts = await j("/api/alerts");
-  const root = document.getElementById("alerts");
-  root.innerHTML = "";
-  if (!alerts.length) {
-    root.innerHTML = `<div class="card muted">No alerts yet. Run own-feed analysis on a watchlist plate. Alerts are never hardcoded.</div>`;
-    return;
+  const node = el("alertList");
+  showLoading(node, 3);
+  try {
+    const alerts = await api("/api/alerts");
+    if (!alerts.length) {
+      showEmpty(node, "No alerts",
+        "An alert is raised only when a camera reads a plate that exactly matches an active watchlist entry.");
+      return;
+    }
+    node.innerHTML = `<div class="cards">${alerts.map(alertCard).join("")}</div>`;
+    await hydrateImages(node);
+    wireAlertActions(node);
+  } catch (error) {
+    showError(node, error, "Try again");
   }
-  alerts.forEach((a) => {
-    const img = a.evidence_path ? `<img src="${evidenceUrl(a.evidence_path)}" alt="crop" />` : "";
-    const wrap = document.createElement("div");
-    wrap.innerHTML = vehicleRowCard(
-      {
-        vehicle: {
-          number: a.plate_norm,
-          type: a.vehicle_type || "unknown",
-          color: a.vehicle_color || "—",
-        },
-        observed_at_ist: a.source_time_ist || a.created_at_ist,
-        camera_id: a.camera_id,
-        location: a.location || a.city || a.camera_name,
-        lat: a.lat,
-        lng: a.lng,
-      },
-      `${img}<div class="muted" style="margin-top:8px">${a.status} · ${a.match_type}</div>
-      <div class="row" style="margin-top:6px">
-        <button data-id="${a.id}" data-s="acknowledged">Ack</button>
-        <button class="secondary" data-id="${a.id}" data-s="confirmed">Confirm</button>
-        <button class="secondary" data-id="${a.id}" data-s="rejected">Reject</button>
-      </div>`
-    );
-    root.appendChild(wrap.firstElementChild);
+}
+
+// ============================================================== watchlist ==
+async function loadWatchlist() {
+  const node = el("watchlistRows");
+  showLoading(node, 2);
+  try {
+    const rows = await api("/api/watchlist");
+    const active = rows.filter((r) => r.active);
+    if (!rows.length) {
+      showEmpty(node, "The watchlist is empty", "Add a plate above to be alerted when it is seen.");
+    } else {
+      node.innerHTML = `<div class="cards">${rows.map((w) => `
+        <article class="card">
+          <div class="card-head">
+            <span class="card-title plate-text">${escapeHtml(w.plate_norm)}</span>
+            <span class="prio prio-${escapeHtml((w.priority || "unset").toLowerCase())}">${
+              escapeHtml(titleCase(w.priority) || "Priority not set")}</span>
+          </div>
+          <p class="card-meta">${escapeHtml(titleCase(w.purpose))} · ${w.active ? "Active" : "Inactive"}</p>
+          <div class="card-actions">
+            <button class="btn-quiet" data-trace="${escapeHtml(w.plate_norm)}">Trace movement</button>
+            <button class="${w.active ? "btn-secondary" : ""}" data-watch="${w.id}" data-active="${w.active ? "0" : "1"}">
+              ${w.active ? "Deactivate" : "Reactivate"}
+            </button>
+          </div>
+        </article>`).join("")}</div>`;
+      wireWatchlistActions(node);
+    }
+    el("navAlertCount").dataset.watchlist = String(active.length);
+  } catch (error) {
+    showError(node, error, "Try again");
+  }
+  loadObservedPlates();
+}
+
+function wireWatchlistActions(root) {
+  root.querySelectorAll("[data-trace]").forEach((button) => {
+    button.addEventListener("click", () => {
+      el("mPlate").value = button.dataset.trace;
+      showPage("movement");
+      runMovement();
+    });
   });
-  root.querySelectorAll("button[data-id]").forEach((btn) => {
-    btn.onclick = async () => {
-      await j(`/api/alerts/${btn.dataset.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: btn.dataset.s }),
+  root.querySelectorAll("[data-watch]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const activate = button.dataset.active === "1";
+      const ok = await confirmAction(
+        activate
+          ? "Reactivate this plate? Sightings already recorded will be re-checked and may raise alerts."
+          : "Deactivate this plate? No new alerts will be raised for it.",
+        activate ? "Reactivate" : "Deactivate"
+      );
+      if (!ok) return;
+      await withBusy(button, async () => {
+        try {
+          await api(`/api/watchlist/${encodeURIComponent(button.dataset.watch)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ active: activate, rematch: activate }),
+          });
+          toast(activate ? "Plate reactivated." : "Plate deactivated.", "ok");
+          loadWatchlist();
+          loadAlerts();
+          loadOverview();
+        } catch (error) {
+          toast(errorText(error), "bad");
+        }
       });
-      loadAlerts();
-    };
+    });
   });
 }
 
-async function loadWorkers() {
-  const cap = await j("/api/capacity");
-  const capEl = document.getElementById("capacityPanel");
-  if (capEl) {
-    capEl.innerHTML = `measured ${cap.measured_safe_fps || "—"} fps · recommended ${cap.recommended_target_fps || "—"} fps · gov decode ok ${cap.government_decode_ok_count || "—"}/${cap.government_decode_tested_count || "—"} · max captures ${cap.max_concurrent_captures}`;
+async function loadObservedPlates() {
+  const node = el("observedPlates");
+  showLoading(node, 2);
+  try {
+    const rows = await api("/api/observed-plates");
+    const usable = rows.filter((p) => p.plate_norm);
+    if (!usable.length) {
+      showEmpty(node, "No plates have been read yet",
+        "Plates are read only when the vehicle is close enough and the image is clear enough.");
+      return;
+    }
+    node.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr>
+        <th scope="col">Plate</th><th scope="col">Times seen</th>
+        <th scope="col">Last camera</th><th scope="col">Status</th>
+        <th scope="col"><span class="visually-hidden">Actions</span></th>
+      </tr></thead>
+      <tbody>${usable.slice(0, 40).map((p) => `<tr>
+        <td><span class="plate-text">${escapeHtml(p.plate_norm)}</span></td>
+        <td class="num">${escapeHtml(p.count)}</td>
+        <td>${escapeHtml(cameraNames.get(p.last_camera) || p.last_camera || "—")}<span class="sub">${
+          escapeHtml(formatTime(p, "last_time", ""))}</span></td>
+        <td>${p.syntax_ok
+          ? `<span class="badge badge-estimated">Valid format</span>`
+          : `<span class="badge badge-unknown">Unusual format</span>`}</td>
+        <td>${p.watchlisted
+          ? `<span class="card-meta">On the watchlist</span>`
+          : `<button class="btn-quiet" data-addwatch="${escapeHtml(p.plate_norm)}">Add to watchlist</button>`}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+    node.querySelectorAll("[data-addwatch]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const plate = button.dataset.addwatch;
+        if (!(await confirmAction(
+          `Add ${plate} to the watchlist? Sightings already recorded will be re-checked and may raise alerts.`,
+          "Add to watchlist"
+        ))) return;
+        await withBusy(button, () => addToWatchlist(plate, "operator_added_from_sighting", "high"));
+      });
+    });
+  } catch (error) {
+    showError(node, error, "Try again");
   }
-  const w = await j("/api/workers");
-  document.getElementById("workerPanel").innerHTML = `
-    <div>max ${w.max_concurrent} · running ${w.running_count} · queued ${w.queued_count} · open captures ${w.open_captures} · previews ${w.preview_count}</div>
-    <div class="muted">queued: ${(w.queued || []).join(", ") || "none"}</div>
-    ${(w.workers || [])
-      .map((s) => `<div>${s.camera_id} · ${s.status} · frames ${s.frames} · pts ${s.last_pts_ms ?? "—"} · reconnect ${s.reconnect_attempt}</div>`)
-      .join("") || "<div class='muted'>No analytics workers running.</div>"}
-  `;
 }
 
-async function plotVehicle(data) {
-  links.clearLayers();
-  routes.clearLayers();
-  if (data.inferred_links) {
-    data.inferred_links.forEach((l) => {
-      L.polyline(
-        [
-          [l.from[1], l.from[0]],
-          [l.to[1], l.to[0]],
-        ],
-        { color: "#c4a35a", dashArray: "8 8", weight: 3 }
-      )
-        .bindPopup(l.label)
-        .addTo(links);
+async function addToWatchlist(plate, purpose, priority) {
+  try {
+    const result = await api("/api/watchlist", {
+      method: "POST",
+      body: JSON.stringify({ plate_raw: plate, purpose, priority, rematch: true }),
+    });
+    const created = result.rematch?.alerts_created || 0;
+    toast(created
+      ? `${result.plate_norm} added. ${created} alert${created === 1 ? "" : "s"} raised from earlier sightings.`
+      : `${result.plate_norm} added to the watchlist.`, "ok");
+    loadWatchlist();
+    loadAlerts();
+    loadOverview();
+  } catch (error) {
+    toast(errorText(error), "bad");
+  }
+}
+
+// ================================================================ cameras ==
+let cameras = [];
+let selectedCamera = null;
+
+const AVAILABILITY_BADGE = {
+  monitoring: "verified",
+  available: "verified",
+  unreachable: "alert",
+  not_checked: "unknown",
+};
+
+// Shared by the Cameras page and the Feed sources panel, so the same action
+// cannot behave two different ways depending on where it was clicked.
+function checkConnections(button, retestFailed = false) {
+  return withBusy(button, async () => {
+    try {
+      const result = await api("/api/capacity/measure", {
+        method: "POST",
+        body: JSON.stringify({ retest_failed: retestFailed }),
+      });
+      const tested = result.tested_count || 0;
+      const untested = result.catalogue_remaining_untested || 0;
+      // "Checked 0 cameras: 0 available. 0 still to check." is technically true
+      // and completely unhelpful. It means every camera already has a result,
+      // so say that and point at the action that would change something.
+      toast(tested
+        ? `Checked ${tested} camera${tested === 1 ? "" : "s"}: ${result.decode_ok_count || 0} available.`
+          + (untested ? ` ${untested} still to check.` : " All cameras now have a result.")
+        : "Every camera already has a connection result. Use Re-check unreachable to try the failed ones again.",
+        tested ? "ok" : "warn");
+      await loadCameras();
+      loadOverview();
+    } catch (error) {
+      toast(errorText(error), "bad");
+    }
+  });
+}
+
+function startAvailable(button) {
+  return withBusy(button, async () => {
+    try {
+      const result = await api("/api/workers/start-accessible", {
+        method: "POST",
+        body: JSON.stringify({ decode_ok_only: true }),
+      });
+      const started = (result.started || []).length;
+      toast(started
+        ? `Monitoring started on ${started} camera${started === 1 ? "" : "s"}.`
+        : "No cameras are available to monitor. Run Check connections first.", started ? "ok" : "warn");
+      await loadCameras();
+      loadOverview();
+    } catch (error) {
+      toast(errorText(error), "bad");
+    }
+  });
+}
+
+async function loadCameras() {
+  const node = el("cameraList");
+  if (!cameras.length) showLoading(node, 5);
+  ensureCameraMap();
+  try {
+    cameras = await api("/api/cameras");
+    renderCameras();
+  } catch (error) {
+    showError(node, error, "Try again");
+  }
+}
+
+function renderCameras() {
+  const node = el("cameraList");
+  const filter = el("cameraFilter").value;
+  const feedFilter = el("cameraFeedFilter").value;
+  const term = el("cameraSearch").value.trim().toLowerCase();
+  const rows = cameras.filter((c) => {
+    if (filter !== "all" && c.availability !== filter) return false;
+    if (feedFilter !== "all" && feedOf(c) !== feedFilter) return false;
+    if (!term) return true;
+    return [c.id, c.name, c.city, c.department].filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(term));
+  });
+
+  if (!rows.length) {
+    showEmpty(node, "No cameras match", "Change the filter or clear the search box.");
+  } else {
+    node.innerHTML = `<div class="table-wrap is-scroll"><table>
+      <thead><tr>
+        <th scope="col">Camera</th><th scope="col">Feed</th><th scope="col">Location</th>
+        <th scope="col">Status</th><th scope="col">Last checked</th>
+        <th scope="col"><span class="visually-hidden">Actions</span></th>
+      </tr></thead>
+      <tbody>${rows.map((c) => `
+        <tr class="is-clickable${selectedCamera === c.id ? " is-selected" : ""}" data-camera="${escapeHtml(c.id)}" tabindex="0">
+          <td>${escapeHtml(c.name || c.id)}<span class="sub">${escapeHtml(c.id)}</span></td>
+          <td>${feedTag(c)}</td>
+          <td>${escapeHtml(placeLabel(c))}</td>
+          <td><span class="badge badge-${AVAILABILITY_BADGE[c.availability] || "unknown"}">${
+            escapeHtml(c.availability_label)}</span></td>
+          <td class="num">${c.decode_tested_at_ist
+            ? escapeHtml(formatTime(c, "decode_tested_at", "decode_tested_at_ist"))
+            : '<span class="sub">Never</span>'}</td>
+          <td><button class="btn-quiet" data-camera-open="${escapeHtml(c.id)}">Details</button></td>
+        </tr>`).join("")}</tbody>
+    </table></div>`;
+    node.querySelectorAll("[data-camera]").forEach((tr) => {
+      const open = () => selectCamera(tr.dataset.camera);
+      tr.addEventListener("click", open);
+      tr.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+      });
     });
   }
-  (data.possible_routes || []).forEach((r) => {
-    if (!r.path || r.path.length < 2) return;
-    const fallback = r.provider === "fallback_straight";
-    L.polyline(r.path, {
-      color: fallback ? "#2c5282" : "#1b365d",
-      weight: 4,
-      opacity: 0.8,
-      dashArray: fallback ? "4 8" : null,
-    })
-      .bindPopup(
-        `${r.label || "OSM map-matched possible path, not a verified route"}<br>${r.from_camera || ""} → ${r.to_camera || ""}<br>${r.provider || ""}`
-      )
-      .addTo(routes);
-  });
-  const pts = (data.sightings || []).filter((s) => s.lat != null).map((s) => [s.lat, s.lng]);
-  (data.sightings || []).forEach((s, i) => {
-    if (s.lat == null) return;
-    L.circleMarker([s.lat, s.lng], { radius: 8, color: "#1b365d", fillOpacity: 0.9 })
-      .bindPopup(`#${i + 1} ${s.camera_id}<br>${s.source_time || ""}<br>${s.plate_raw || s.plate_norm}`)
-      .addTo(links);
-  });
-  if (pts.length) map.fitBounds(pts, { padding: [40, 40] });
+  drawCameraMap();
+  if (selectedCamera) renderCameraDetail();
+  else showEmpty(el("cameraDetail"), "Select a camera", "Choose a camera from the list to see its status and controls.");
 }
 
-async function searchPlate() {
-  const plate = document.getElementById("plateQuery").value;
-  const data = await j(`/api/vehicles/${encodeURIComponent(plate)}`);
-  links.clearLayers();
-  const hist = document.getElementById("history");
-  if (!data.sightings.length) {
-    hist.innerHTML = `<div class="card muted">No persisted sightings for ${data.plate_norm}.</div>`;
+function drawCameraMap() {
+  if (!maps.camera) return;
+  layers.cameraMarkers.clearLayers();
+  const points = [];
+  cameras.forEach((c) => {
+    if (c.lat == null || c.lng == null || !Number.isFinite(Number(c.lat))) return;
+    const colour = { monitoring: "#186B43", available: "#2A5B99", unreachable: "#A4241D" }[c.availability] || "#6B788C";
+    points.push([c.lat, c.lng]);
+    L.circleMarker([c.lat, c.lng], { radius: 7, color: colour, fillColor: colour, fillOpacity: 0.85, weight: 2 })
+      .bindPopup(`<strong>${escapeHtml(c.name || c.id)}</strong><br>${escapeHtml(placeLabel(c))}<br>${
+        escapeHtml(c.availability_label)}`)
+      .on("click", () => selectCamera(c.id))
+      .addTo(layers.cameraMarkers);
+  });
+  if (points.length && !maps.camera._gpFitted) {
+    maps.camera.fitBounds(points, { padding: [40, 40], maxZoom: 11 });
+    maps.camera._gpFitted = true;
+  }
+}
+
+function selectCamera(id) {
+  selectedCamera = id;
+  document.querySelectorAll("[data-camera]").forEach((tr) => {
+    tr.classList.toggle("is-selected", tr.dataset.camera === id);
+  });
+  renderCameraDetail();
+  el("cameraDetailPanel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function renderCameraDetail() {
+  const camera = cameras.find((c) => c.id === selectedCamera);
+  const node = el("cameraDetail");
+  if (!camera) {
+    showEmpty(node, "Camera not found", "It may have been removed. Refresh the list.");
     return;
   }
-  hist.innerHTML = data.sightings
-    .map(
-      (s) =>
-        `<div class="card"><b>${s.camera_id}</b> · ${s.city || ""} · ${s.department || ""}<div class="muted">${s.source_time}<br>ingest ${s.ingest_time || "—"} · pts ${s.source_pts_ms ?? "—"}<br>raw ${s.plate_raw} → ${s.plate_voted || s.plate_norm} · ${s.model_id}</div></div>`
-    )
-    .join("");
-  plotVehicle(data);
-}
+  const monitoring = camera.availability === "monitoring";
+  const recorded = camera.source_type === "image_dir" || camera.source_type === "file";
+  node.innerHTML = `
+    <dl class="datalist">
+      <dt>Camera</dt><dd>${escapeHtml(camera.name || camera.id)}<span class="sub">${escapeHtml(camera.id)}</span></dd>
+      <dt>Feed</dt><dd>${feedTag(camera)}<span class="sub">${escapeHtml(FEED[feedOf(camera)].detail)}</span></dd>
+      <dt>Location</dt><dd>${escapeHtml(placeLabel(camera))}${
+        camera.coords_are_inferred ? '<span class="sub">Position estimated from the camera name, not surveyed</span>' : ""}</dd>
+      <dt>Status</dt><dd><span class="badge badge-${AVAILABILITY_BADGE[camera.availability] || "unknown"}">${
+        escapeHtml(camera.availability_label)}</span><span class="sub">${escapeHtml(camera.availability_detail)}</span></dd>
+      <dt>Last frame</dt><dd>${camera.last_frame_at_ist
+        ? escapeHtml(formatTime(camera, "last_frame_at", "last_frame_at_ist"))
+        : '<span class="sub">No frame received yet</span>'}</dd>
+    </dl>
 
-async function refresh() {
-  await loadCoverage();
-  await loadCameras();
-  await loadAlerts();
-  await loadWorkers();
-  await loadWatchlist();
-  await loadRecognitionDiagnostics();
-}
+    <div class="card-actions" style="margin-top:12px">
+      <button ${monitoring ? 'class="btn-secondary"' : ""} data-monitor="${monitoring ? "stop" : "start"}">
+        ${monitoring ? "Stop monitoring" : "Start monitoring"}
+      </button>
+      ${recorded ? `<button class="btn-secondary" data-analyse>Analyse recorded video</button>` : ""}
+      <button class="btn-secondary" data-live-frame>View live frame</button>
+    </div>
+    <div id="cameraFrame" style="margin-top:12px"></div>`;
 
-document.querySelectorAll(".tab").forEach((tab) => {
-  tab.onclick = () => {
-    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("on"));
-    tab.classList.add("on");
-    document.querySelectorAll("[data-panel]").forEach((p) => {
-      p.classList.toggle("hidden", p.dataset.panel !== tab.dataset.tab);
+  node.querySelector("[data-monitor]").addEventListener("click", async (event) => {
+    const action = event.currentTarget.dataset.monitor;
+    await withBusy(event.currentTarget, async () => {
+      try {
+        await api(`/api/workers/${encodeURIComponent(camera.id)}/${action}`, { method: "POST" });
+        toast(action === "start"
+          ? "Monitoring requested. The status updates once a frame arrives."
+          : "Monitoring stopped.", "ok");
+        await loadCameras();
+      } catch (error) {
+        toast(errorText(error), "bad");
+      }
     });
-  };
-});
+  });
 
-document.getElementById("btnRefresh").onclick = refresh;
-document.getElementById("btnSearch").onclick = searchPlate;
-document.getElementById("ledgerFilter").onchange = renderLedger;
-document.getElementById("btnMonitor").onclick = async () => {
-  const plate = document.getElementById("monPlate").value.trim();
-  const day = document.getElementById("monDay").value;
-  const q = new URLSearchParams({ routes: "true" });
-  if (day) q.set("day", day);
-  const data = await j(`/api/vehicles/${encodeURIComponent(plate)}?${q}`);
-  const st = document.getElementById("monitorStatus");
-  st.className = "card";
-  const matchNote = data.match_error
-    ? data.match_error
-    : `${data.map_match_provider || "osrm"} · ${(data.possible_routes || []).length} snapped path(s)`;
-  st.innerHTML = `<b>${data.plate_norm}</b> · ${data.sightings.length} sighting(s)<br><span class="muted">${data.path_disclaimer || ""} ${matchNote}</span>`;
-  document.getElementById("monitorTimeline").innerHTML = (data.sightings || [])
-    .map(
-      (s, i) =>
-        `<div class="card"><b>#${i + 1} ${s.camera_id}</b> · ${s.city || ""}<div class="muted">${s.source_time}<br>raw ${s.plate_raw} · ${s.model_id}</div></div>`
-    )
-    .join("");
-  plotVehicle(data);
-  const token = encodeURIComponent(TOKEN);
-  document.getElementById("dlDayCsv").href = `/api/vehicles/${encodeURIComponent(plate)}/export.csv?${q}&token=${token}`;
-  document.getElementById("dlDayGeo").href = `/api/vehicles/${encodeURIComponent(plate)}/export.geojson?${q}&token=${token}`;
-};
-document.getElementById("btnInvestigate").onclick = async () => {
-  const start = document.getElementById("invStart").value;
-  const end = document.getElementById("invEnd").value;
-  const q = new URLSearchParams();
-  if (start) q.set("start", start);
-  if (end) q.set("end", end);
-  if (start && !end) q.set("at", start);
-  const data = await j(`/api/cameras/active-at?${q}`);
-  const el = document.getElementById("investigateOut");
-  el.className = "card";
-  el.innerHTML = `<div>${data.camera_count} camera(s) between ${data.from} and ${data.to}</div><div class="muted">${data.disclaimer}</div>` +
-    (data.cameras || [])
-      .map(
-        (c) =>
-          `<div><b>${c.id}</b> · ${c.origin} · sightings ${c.sightings_in_range} · ${c.analytics_was_active ? "analytics window" : "sighting only"}</div>`
-      )
-      .join("");
-  markers.clearLayers();
-  (data.cameras || []).forEach((c) => {
-    if (c.lat == null) return;
-    L.circleMarker([c.lat, c.lng], { radius: 8, color: "#2f6f4e", fillOpacity: 0.9 })
-      .bindPopup(`${c.id}<br>analytics active in window`)
-      .addTo(markers);
+  node.querySelector("[data-analyse]")?.addEventListener("click", async (event) => {
+    await withBusy(event.currentTarget, async () => {
+      try {
+        const result = await api(`/api/cameras/${encodeURIComponent(camera.id)}/analyze`, { method: "POST" });
+        toast(`Analysis finished. ${result.sightings || 0} plate reading${
+          result.sightings === 1 ? "" : "s"}, ${result.alerts || 0} alert${result.alerts === 1 ? "" : "s"}.`, "ok");
+        await loadCameras();
+        loadOverview();
+      } catch (error) {
+        toast(errorText(error), "bad");
+      }
+    });
   });
-};
-document.getElementById("btnWatchAdd").onclick = async () => {
-  const plate = document.getElementById("wlPlate").value.trim();
-  if (!plate) return;
-  const out = await j("/api/watchlist", {
-    method: "POST",
-    body: JSON.stringify({
-      plate_raw: plate,
-      purpose: document.getElementById("wlPurpose").value.trim() || "stolen_vehicle",
-      priority: document.getElementById("wlPriority").value,
-      rematch: true,
-    }),
+
+  node.querySelector("[data-live-frame]").addEventListener("click", async (event) => {
+    const frame = el("cameraFrame");
+    await withBusy(event.currentTarget, async () => {
+      showLoading(frame, 1);
+      try {
+        const response = await fetch(`/api/cameras/${encodeURIComponent(camera.id)}/snapshot`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new ApiError("No live frame is available from this camera right now.", response.status);
+        const url = URL.createObjectURL(await response.blob());
+        objectUrls.add(url);
+        frame.innerHTML = `<figure class="evidence-pair"><figure>
+          <img src="${url}" alt="Live frame from ${escapeHtml(camera.name || camera.id)}" />
+          <figcaption>Single frame taken just now for the operator. Not a recording.</figcaption>
+        </figure></figure>`;
+      } catch (error) {
+        showError(frame, error);
+      }
+    });
   });
-  alert(`Watchlist ${out.plate_norm}. Rematch created ${out.rematch && out.rematch.alerts_created} alert(s).`);
-  loadWatchlist();
-  loadAlerts();
-};
-document.getElementById("btnClosePreview").onclick = closePreview;
-document.getElementById("btnAnalyze").onclick = async () => {
-  document.getElementById("btnAnalyze").disabled = true;
-  document.getElementById("btnAnalyze").textContent = "Analyzing…";
+}
+
+// ================================================================== boot ===
+function bindNav() {
+  document.querySelectorAll(".navitem").forEach((button) => {
+    button.addEventListener("click", () => showPage(button.dataset.page));
+  });
+  document.querySelectorAll("[data-goto]").forEach((button) => {
+    button.addEventListener("click", () => showPage(button.dataset.goto));
+  });
+}
+
+function bindSearch() {
+  el("searchForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    withBusy(el("btnSearch"), runSearch);
+  });
+  document.querySelectorAll("[data-range]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setRange(Number(button.dataset.range));
+      withBusy(el("btnSearch"), runSearch);
+    });
+  });
+  el("btnExport").addEventListener("click", () => withBusy(el("btnExport"), exportSearch));
+}
+
+// One download path for every export. The token travels in the header, so it
+// never appears in a link the browser or a proxy might record; the server
+// writes an audit entry for each export it produces.
+async function download(path, filename) {
   try {
-    const out = await j("/api/analyze-active", { method: "POST" });
-    alert(`Sightings from ${out.ran} source(s). Coverage: ${out.coverage.honest_coverage}`);
-    await refresh();
-    await searchPlate();
-  } catch (err) {
-    alert(String(err));
-  } finally {
-    document.getElementById("btnAnalyze").disabled = false;
-    document.getElementById("btnAnalyze").textContent = "Run own-feed analysis";
+    const response = await fetch(path, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new ApiError("The export could not be produced.", response.status);
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast("Export downloaded. Access to evidence is recorded.", "ok");
+  } catch (error) {
+    toast(errorText(error), "bad");
   }
-};
-document.getElementById("btnSync").onclick = async () => {
-  try {
-    const out = await j("/api/catalogue/sync", { method: "POST" });
-    alert(out.ok ? `Catalogue cameras ${out.cameras}` : `Catalogue sync failed: ${out.error}`);
-    await refresh();
-  } catch (err) {
-    alert(String(err));
+}
+
+async function exportSearch() {
+  const query = searchQuery();
+  if (!query || query === "invalid") {
+    toast("Choose a valid time range before exporting.", "warn");
+    return;
   }
-};
-document.getElementById("btnMeasure").onclick = async () => {
-  const btn = document.getElementById("btnMeasure");
-  btn.disabled = true;
-  btn.textContent = "Measuring…";
-  try {
-    const out = await j("/api/capacity/measure", { method: "POST" });
-    alert(
-      `This batch: decode ok ${out.decode_ok_count}/${out.tested_count}. ` +
-        `Already ok ${(out.already_decode_ok || []).length}. ` +
-        `Untested left ${out.catalogue_remaining_untested}. ` +
-        `Failed left ${out.catalogue_remaining_failed ?? "—"}. ` +
-        `${out.disclaimer}`
+  // The export covers the whole filtered range, not the page on screen, so the
+  // paging and plate-state parameters are dropped rather than carried over.
+  const params = new URLSearchParams(query);
+  ["plate_state", "review", "limit", "offset", "sort"].forEach((key) => params.delete(key));
+  await download(`/api/investigations/vehicles/export.csv?${params}`,
+    `vehicle-observations-${new Date().toISOString().slice(0, 10)}.csv`);
+}
+
+function bindMovement() {
+  el("movementForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    withBusy(el("btnMovement"), runMovement);
+  });
+  const exportMovement = (extension) => (event) => withBusy(event.currentTarget, async () => {
+    const plate = el("mPlate").value.trim();
+    if (!plate) { toast("Enter a number plate first.", "warn"); return; }
+    const query = new URLSearchParams();
+    const day = el("mDay").value;
+    if (day) query.set("day", day);
+    await download(`/api/vehicles/${encodeURIComponent(plate)}/export.${extension}?${query}`,
+      `${plate}-sightings.${extension}`);
+  });
+  el("btnMovementCsv").addEventListener("click", exportMovement("csv"));
+  el("btnMovementGeo").addEventListener("click", exportMovement("geojson"));
+}
+
+function bindWatchlist() {
+  el("watchlistForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const plate = el("wPlate").value.trim();
+    if (!plate) return;
+    const ok = await confirmAction(
+      `Add ${plate.toUpperCase()} to the watchlist? Sightings already recorded will be re-checked and may raise alerts.`,
+      "Add to watchlist"
     );
-    await refresh();
-  } catch (err) {
-    alert(String(err));
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Measure government decode";
-  }
-};
-async function startHunt() {
-  const out = await j("/api/hunt/start", { method: "POST", body: JSON.stringify({ max_concurrent: concurrentFromUi() }) });
-  alert(out.disclaimer || out.label || `Hunt started. Hunting ${(out.hunting || []).length}/${out.total || 0}.`);
-  refresh();
-}
-async function pinHunt() {
-  const out = await j("/api/hunt/pin", { method: "POST", body: JSON.stringify({ max_concurrent: concurrentFromUi() }) });
-  alert(out.disclaimer || `Pinned ${(out.started || []).length} working cameras. Queued ${(out.queued || []).length}.`);
-  refresh();
-}
-async function stopHunt() {
-  await j("/api/hunt/stop", { method: "POST" });
-  refresh();
-}
-document.getElementById("btnHuntStart").onclick = startHunt;
-document.getElementById("btnHuntStop").onclick = stopHunt;
-const huntPin = document.getElementById("btnHuntPin");
-if (huntPin) huntPin.onclick = pinHunt;
-const huntStart2 = document.getElementById("btnHuntStart2");
-const huntStop2 = document.getElementById("btnHuntStop2");
-if (huntStart2) huntStart2.onclick = startHunt;
-if (huntStop2) huntStop2.onclick = stopHunt;
-const huntPin2 = document.getElementById("btnHuntPin2");
-if (huntPin2) huntPin2.onclick = pinHunt;
-document.querySelectorAll(".js-max-concurrent").forEach((el) => {
-  el.addEventListener("change", () => {
-    const n = concurrentFromUi();
-    document.querySelectorAll(".js-max-concurrent").forEach((other) => {
-      other.value = String(n);
+    if (!ok) return;
+    await withBusy(el("btnWatchAdd"), async () => {
+      await addToWatchlist(plate, el("wPurpose").value, el("wPriority").value);
+      el("wPlate").value = "";
     });
   });
-});
-document.getElementById("btnStartAccessible").onclick = async () => {
-  const out = await j("/api/workers/start-accessible", {
-    method: "POST",
-    body: JSON.stringify({ decode_ok_only: true }),
-  });
-  alert(`Started ${ (out.started || []).length }. Queued ${ (out.queued || []).length }. ${out.disclaimer || ""}`);
-  refresh();
-};
-document.getElementById("btnStartWorker").onclick = async () => {
-  const id = document.getElementById("workerCam").value.trim();
-  if (!id) return;
-  await j(`/api/workers/${id}/start`, { method: "POST" });
-  refresh();
-};
-document.getElementById("btnStopWorker").onclick = async () => {
-  const id = document.getElementById("workerCam").value.trim();
-  if (!id) return;
-  await j(`/api/workers/${id}/stop`, { method: "POST" });
-  refresh();
-};
-document.getElementById("btnStopAll").onclick = async () => {
-  await j("/api/workers/stop-all", { method: "POST" });
-  refresh();
-};
-document.getElementById("btnCost").onclick = async () => {
-  const out = await j("/api/cost/estimate", {
-    method: "POST",
-    body: JSON.stringify({
-      camera_count: Number(document.getElementById("c_count").value),
-      avg_bitrate_kbps: Number(document.getElementById("c_br").value),
-      target_analysis_fps: Number(document.getElementById("c_fps").value),
-      active_cameras: Number(document.getElementById("c_active").value),
-      measured_worker_fps: Number(document.getElementById("c_wfps").value),
-      gpu_hourly_cost: Number(document.getElementById("c_gpu").value),
-      storage_cost_per_gb: Number(document.getElementById("c_sto").value),
-      evidence_events_per_day: Number(document.getElementById("c_ev").value),
-    }),
-  });
-  document.getElementById("costOut").textContent = JSON.stringify(out, null, 2);
-};
-// Vehicle-first investigation replaces the older analytics-active-only search.
-document.getElementById("btnInvestigate").onclick = searchVehicleObservations;
-document.querySelectorAll("[data-investigation-window]").forEach((button) => {
-  button.onclick = () => {
-    setInvestigationWindow(Number(button.dataset.investigationWindow || 24));
-    searchVehicleObservations();
-  };
-});
-document.getElementById("btnTogglePlateRecognition").onclick = async () => {
-  const current = await loadPlateRecognitionSettings();
-  const out = await j("/api/settings/recognition", { method: "PATCH", body: JSON.stringify({ enabled: !current.enabled }) });
-  await loadPlateRecognitionSettings();
-  await loadCoverage();
-  alert(`Number-plate recognition is now ${out.enabled ? "ON" : "OFF"}.`);
-};
+}
 
-document.getElementById("dlJson").onclick = (e) => {
-  e.preventDefault();
-  window.open("/api/reports/sightings.json?token=" + encodeURIComponent(TOKEN), "_blank");
-};
-document.getElementById("dlCsv").onclick = (e) => {
-  e.preventDefault();
-  window.open("/api/reports/sightings.csv?token=" + encodeURIComponent(TOKEN), "_blank");
-};
+function bindCameras() {
+  el("cameraFilter").addEventListener("change", renderCameras);
+  el("cameraSearch").addEventListener("input", renderCameras);
 
-setInvestigationWindow(24);
-loadInvestigationOptions().then(searchVehicleObservations).catch(() => {});
-loadPlateRecognitionSettings().catch(() => {});
-refresh();
-setInterval(() => {
-  loadCoverage();
-  loadWorkers();
-  loadLiveVehicles();
-  loadLiveSightings();
-  loadRecognitionDiagnostics();
-}, 4000);
+  el("btnCheckCameras").addEventListener("click", (event) => checkConnections(event.currentTarget));
+  el("btnRecheckFailed").addEventListener("click", (event) => checkConnections(event.currentTarget, true));
+  el("btnStartAvailable").addEventListener("click", (event) => startAvailable(event.currentTarget));
+  el("cameraFeedFilter").addEventListener("change", renderCameras);
+
+  el("btnStopAll").addEventListener("click", async (event) => {
+    if (!(await confirmAction("Stop monitoring on every camera? No new vehicles will be recorded until it is restarted.", "Stop all"))) return;
+    await withBusy(event.currentTarget, async () => {
+      try {
+        await api("/api/workers/stop-all", { method: "POST" });
+        toast("Monitoring stopped on all cameras.", "ok");
+        await loadCameras();
+        loadOverview();
+      } catch (error) {
+        toast(errorText(error), "bad");
+      }
+    });
+  });
+
+  el("cameraForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const id = el("nId").value.trim();
+    if (!id) return;
+    const lat = el("nLat").value.trim();
+    const lng = el("nLng").value.trim();
+    if (Boolean(lat) !== Boolean(lng)) {
+      toast("Enter both latitude and longitude, or neither.", "warn");
+      return;
+    }
+    await withBusy(el("btnAddCamera"), async () => {
+      try {
+        const body = { id, source_type: "rtsp" };
+        const optional = { name: "nName", department: "nDept", city: "nCity" };
+        Object.entries(optional).forEach(([key, field]) => {
+          const value = el(field).value.trim();
+          if (value) body[key] = value;
+        });
+        if (lat && lng) { body.lat = Number(lat); body.lng = Number(lng); }
+        await api("/api/cameras", { method: "POST", body: JSON.stringify(body) });
+        toast(`${id} added. It stays Not checked until its connection is tested.`, "ok");
+        el("cameraForm").reset();
+        await loadCameras();
+        loadOverview();
+      } catch (error) {
+        toast(errorText(error), "bad");
+      }
+    });
+  });
+}
+
+function bindDialogs() {
+  el("btnCloseDetail").addEventListener("click", () => el("detailDialog").close());
+  el("detailDialog").addEventListener("close", () => { openObservationId = null; });
+  document.addEventListener("click", (event) => {
+    if (event.target.matches("[data-retry]")) {
+      const page = event.target.closest(".page")?.dataset.page || currentPage;
+      showPage(page);
+    }
+  });
+}
+
+// ---- polling ---------------------------------------------------------------
+// The alert queue has to move without the operator clicking anything, but a
+// dead backend must look dead rather than showing frozen figures as if live.
+let pollFailures = 0;
+
+async function poll() {
+  if (document.hidden || !token) return;
+  try {
+    await api("/api/ui/overview");
+    pollFailures = 0;
+    el("connectionBanner").classList.add("hidden");
+    loadOverview();
+    if (currentPage === "alerts") loadAlerts();
+  } catch (_error) {
+    pollFailures += 1;
+    if (pollFailures >= 2) {
+      const banner = el("connectionBanner");
+      banner.textContent = "The server cannot be reached. The figures below are from the last successful update.";
+      banner.classList.remove("hidden");
+    }
+  }
+}
+
+// ---- sign in / out ---------------------------------------------------------
+function signOut(message) {
+  token = "";
+  sessionStorage.removeItem(SESSION_KEY);
+  releaseImages();
+  el("app").classList.add("hidden");
+  el("signIn").classList.remove("hidden");
+  const error = el("signInError");
+  if (message) {
+    error.textContent = message;
+    error.classList.remove("hidden");
+  } else {
+    error.classList.add("hidden");
+  }
+  el("operatorToken").value = "";
+  el("operatorToken").focus();
+}
+
+async function startSession() {
+  el("signIn").classList.add("hidden");
+  el("app").classList.remove("hidden");
+  try {
+    const config = await api("/api/ui/config");
+    el("envLabel").textContent = config.app_env || "production";
+    // Shown only where the server actually serves /dev. In production the
+    // link stays hidden AND the route 404s, so this is a convenience, not the
+    // thing keeping the developer console out of reach.
+    el("devConsoleLink").classList.toggle("hidden", !config.developer_ui);
+  } catch (_error) {
+    /* the banner covers a backend that is down */
+  }
+  await loadSearchOptions();
+  setRange(24);
+  showPage("overview");
+  poll();
+}
+
+el("signInForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const entered = el("operatorToken").value.trim();
+  const error = el("signInError");
+  error.classList.add("hidden");
+  if (!entered) return;
+  await withBusy(el("signInButton"), async () => {
+    // Validated against an endpoint that requires the operator role, so a wrong
+    // token fails here rather than half way through an investigation.
+    const response = await fetch("/api/settings/recognition", {
+      headers: { Authorization: `Bearer ${entered}` },
+    }).catch(() => null);
+    if (!response || !response.ok) {
+      error.textContent = response
+        ? "That access token was not recognised."
+        : "The server could not be reached. Check that the console is running.";
+      error.classList.remove("hidden");
+      return;
+    }
+    token = entered;
+    sessionStorage.setItem(SESSION_KEY, token);
+    await startSession();
+  });
+});
+
+el("btnSignOut").addEventListener("click", () => signOut());
+
+bindNav();
+bindSearch();
+bindMovement();
+bindWatchlist();
+bindCameras();
+bindDialogs();
+setInterval(poll, 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+
+if (token) startSession();
+else el("operatorToken").focus();

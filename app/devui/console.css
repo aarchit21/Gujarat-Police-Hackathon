@@ -1,0 +1,485 @@
+/* =========================================================================
+   Gujarat CCTV Operations Console
+   Presentation layer only. Every DOM hook app.js depends on is preserved:
+   ids, .tab/.on, [data-tab]/[data-panel], .hidden, .js-max-concurrent,
+   .card/.muted/.row/.secondary/.vehicle-grid/.status-connected/.status-blocked.
+   NOTE: app.js overwrites className on #liveVehicles, #liveSightings,
+   #investigateOut, #plateRecognitionSettings, #recognitionSummary and
+   #monitorStatus — never style those by class, only by id.
+   ========================================================================= */
+
+:root {
+  --ground:#EDF0F6; --surface:#FFFFFF; --surface-2:#F6F8FC;
+  --ink:#101A2B; --body:#3C4A60; --muted:#6B7A93;
+  --line:#DDE3ED; --line-strong:#C6CFDE;
+  --navy:#142A4C; --navy-2:#1E3C6A; --navy-3:#2A5290;
+  --gold:#C8A44D; --gold-soft:#F5EDD8;
+  --ok:#1B7A4B;
+  --bad:#B3261E; --bad-bg:#FBE6E4;
+  --rail-text:#AFC0DA;
+  --shadow:0 1px 2px rgba(16,26,43,.06), 0 4px 12px rgba(16,26,43,.05);
+  --r:12px; --r-sm:8px;
+  --ui:Barlow,"Segoe UI",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+
+* { box-sizing:border-box; }
+html, body {
+  margin:0; min-height:100%;
+  font-family:"Source Sans 3","Segoe UI",system-ui,sans-serif;
+  font-size:14px; line-height:1.5; background:var(--ground); color:var(--body);
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4 { font-family:var(--ui); }
+:focus-visible { outline:2px solid var(--navy-3); outline-offset:2px; border-radius:4px; }
+@media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important;} }
+
+/* .hidden must beat every display rule below — app.js toggles it on
+   <section> panels, #previewBox, #previewVideo and #previewImage. */
+.hidden { display:none !important; }
+
+/* ---------------------------- shell ---------------------------- */
+.shell { display:grid; grid-template-columns:216px 1fr; min-height:100vh; }
+
+/* ---------------------------- left rail ---------------------------- */
+.rail {
+  background:var(--navy); color:var(--rail-text); padding:18px 12px 22px;
+  display:flex; flex-direction:column; gap:22px;
+  position:sticky; top:0; height:100vh; overflow-y:auto;
+}
+.brand { display:flex; align-items:center; gap:10px; padding:0 6px; }
+.brand-mark {
+  width:36px; height:36px; border-radius:9px; flex:none;
+  background:linear-gradient(155deg,var(--gold),#A8842F);
+  display:grid; place-items:center; color:#1B1405;
+  font-family:var(--ui); font-weight:700; font-size:14px;
+}
+.brand-name { font-family:var(--ui); font-weight:700; font-size:14px; color:#fff; line-height:1.15; }
+.brand-sub { font-size:10px; color:#8FA4C6; letter-spacing:.08em; text-transform:uppercase; margin-top:2px; }
+
+.navgroup { display:flex; flex-direction:column; gap:2px; }
+.navlabel {
+  font-family:var(--ui); font-size:9.5px; font-weight:600; letter-spacing:.13em;
+  text-transform:uppercase; color:#6E86AC; padding:0 10px; margin-bottom:6px;
+}
+.rail-foot {
+  margin-top:auto; border-top:1px solid rgba(255,255,255,.1); padding-top:12px;
+  font-size:11px; color:#6E86AC; line-height:1.45;
+}
+.rail-foot b { color:#A8BBD8; font-weight:600; }
+
+/* Rail nav items ARE the tabs — app.js queries .tab and toggles .on. */
+.navitem {
+  display:flex; align-items:center; gap:10px; width:100%; text-align:left;
+  padding:8px 10px; border-radius:7px; border:0; background:none; cursor:pointer;
+  color:var(--rail-text); font-family:var(--ui); font-size:13px; font-weight:500;
+  transition:background .14s, color .14s;
+}
+.navitem svg {
+  width:16px; height:16px; flex:none; stroke:currentColor; fill:none;
+  stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round;
+}
+.navitem:hover { background:rgba(255,255,255,.07); color:#E4EBF7; }
+.navitem.on { background:var(--navy-3); color:#fff; box-shadow:inset 3px 0 0 var(--gold); }
+
+/* ---------------------------- main ---------------------------- */
+.main { display:flex; flex-direction:column; min-width:0; }
+
+.topbar {
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  flex-wrap:wrap; padding:14px 22px;
+  background:var(--surface); border-bottom:1px solid var(--line);
+}
+.topbar h1 { margin:0; font-size:18px; font-weight:600; color:var(--ink); letter-spacing:-.01em; }
+.crumb {
+  font-family:var(--ui); font-size:10.5px; font-weight:600; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--muted); margin-bottom:1px;
+}
+.topbar .meta { font-size:12px; color:var(--muted); font-family:var(--mono); }
+
+.statusbar { display:flex; flex-direction:column; }
+.banner {
+  background:var(--gold-soft); border-bottom:1px solid rgba(200,164,77,.45);
+  padding:8px 22px; font-size:12.5px; color:var(--ink);
+}
+.stats {
+  display:flex; flex-wrap:wrap; gap:7px; padding:9px 22px;
+  background:var(--surface); border-bottom:1px solid var(--line); font-size:12px;
+}
+.stats span {
+  background:var(--surface-2); border:1px solid var(--line); border-radius:20px;
+  padding:4px 11px; color:var(--body); font-variant-numeric:tabular-nums;
+}
+.stats span b { color:var(--ink); font-weight:600; }
+.striprow { display:flex; flex-wrap:wrap; }
+.demo, .hunt { padding:6px 22px; font-size:11.5px; flex:1 1 300px; font-family:var(--mono); }
+.demo { background:var(--navy); color:#C8D6EC; }
+.hunt { background:var(--navy-2); color:#D3E0F2; }
+
+.notice {
+  display:flex; gap:10px; align-items:flex-start; margin:14px 22px 0;
+  background:var(--gold-soft); border:1px solid rgba(200,164,77,.45);
+  border-left:4px solid var(--gold); border-radius:var(--r-sm);
+  padding:10px 13px; font-size:12.5px; color:var(--ink); line-height:1.5;
+}
+.notice svg { width:16px; height:16px; flex:none; margin-top:1px; stroke:var(--gold); fill:none; stroke-width:1.9; }
+.notice b { font-weight:600; }
+
+/* ---------------------------- layout ---------------------------- */
+.layout {
+  display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);
+  gap:14px; padding:14px 22px 24px; align-items:start;
+}
+.map-wrap {
+  position:relative; min-height:480px; height:calc(100vh - 230px);
+  background:var(--surface); border:1px solid var(--line);
+  border-radius:var(--r); box-shadow:var(--shadow); overflow:hidden;
+  position:sticky; top:14px;
+}
+/* Model 1 onboarding block. Collapsed by default so the ledger stays the
+   primary view; the operator opens it only to add or import cameras. */
+.onboard {
+  border:1px solid var(--line); border-radius:var(--r);
+  padding:10px 14px; margin:0 0 14px; background:var(--surface);
+}
+.onboard > summary {
+  cursor:pointer; font-family:var(--ui); font-weight:600; font-size:12.5px;
+  color:#2c5282;
+}
+.onboard h4 {
+  margin:14px 0 8px; font-family:var(--ui); font-size:10.5px; font-weight:600;
+  letter-spacing:.07em; text-transform:uppercase; color:var(--muted);
+}
+.onboard .grid2 {
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:8px 12px;
+}
+.onboard label {
+  display:flex; flex-direction:column; gap:3px;
+  font-family:var(--ui); font-size:10.5px; font-weight:600;
+  letter-spacing:.05em; text-transform:uppercase; color:var(--muted);
+}
+.onboard label input, .onboard label select { width:100%; }
+.onboard textarea {
+  width:100%; font-family:var(--mono); font-size:12px; padding:8px;
+  border:1px solid var(--line); border-radius:var(--r);
+  background:var(--surface); color:var(--text); resize:vertical;
+}
+.onboard code {
+  font-family:var(--mono); font-size:11px; background:rgba(127,127,127,.15);
+  padding:1px 4px; border-radius:3px;
+}
+#importOut { margin-top:10px; }
+#importOut .err { color:#c53030; font-family:var(--mono); font-size:11.5px; }
+
+/* Alert priority. Rank is carried by the text label as well as the colour, so
+   the queue stays readable without relying on colour alone. */
+.prio-badge {
+  display:inline-block; padding:2px 7px; border-radius:3px;
+  font-family:var(--ui); font-size:9.5px; font-weight:700; letter-spacing:.07em;
+}
+.prio-badge-high { background:#7a1c1c; color:#ffdede; }
+.prio-badge-medium { background:#8a6d00; color:#fff4cf; }
+.prio-badge-low { background:#2f4858; color:#d6e6f0; }
+.prio-badge-unset { background:#4a4a4a; color:#e0e0e0; }
+.card.prio-high { border-left-width:5px; border-left-color:#c53030; }
+.card.prio-medium { border-left-color:#c4a35a; }
+
+/* Stale-data warning. Silence would let the operator read frozen numbers as
+   live ones, so a sustained poll outage has to be visible. */
+.pollstatus {
+  padding:7px 22px; font-family:"Source Sans 3",sans-serif; font-size:12px;
+  background:#5a1d1d; color:#ffd7d7; border-top:1px solid #7a2a2a;
+}
+
+/* Leaflet needs a sized block container — app.js calls L.map("map") at load. */
+#map { height:100%; width:100%; min-height:480px; position:relative; }
+
+/* Shown only when Leaflet or the OSM tiles are unreachable. z-index clears the
+   Leaflet panes (400/600) so the operator cannot mistake a dead basemap for an
+   empty fleet. */
+.map-offline-note {
+  position:absolute; left:10px; right:10px; top:10px; z-index:700;
+  background:var(--surface); border:1px solid var(--line);
+  border-left:4px solid #c4a35a; border-radius:var(--r);
+  padding:9px 12px; font-family:"Source Sans 3",sans-serif; font-size:12px;
+  color:var(--text); box-shadow:var(--shadow); line-height:1.45;
+}
+
+aside {
+  min-width:0; background:var(--surface); border:1px solid var(--line);
+  border-radius:var(--r); box-shadow:var(--shadow); padding:14px 16px 20px;
+}
+
+/* ---------------------------- typography ---------------------------- */
+h2 {
+  font-size:12px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--navy-3); margin:18px 0 8px; font-weight:600;
+  display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;
+}
+aside > section > h2:first-child { margin-top:4px; }
+.h2-note {
+  font-family:"Source Sans 3",sans-serif; font-size:11px; font-weight:400;
+  letter-spacing:0; text-transform:none; color:var(--muted);
+}
+.legend { font-size:12px; color:var(--muted); margin:0 0 10px; line-height:1.5; }
+.muted { color:var(--muted); }
+.ok  { color:var(--ok);  font-weight:600; }
+.bad { color:var(--bad); font-weight:600; }
+
+/* ---------------------------- controls ---------------------------- */
+.row { display:flex; gap:7px; flex-wrap:wrap; margin-bottom:9px; align-items:center; }
+.toolbar {
+  display:flex; gap:7px; flex-wrap:wrap; align-items:flex-end;
+  padding:11px 12px; background:var(--surface-2);
+  border:1px solid var(--line); border-radius:var(--r-sm); margin-bottom:10px;
+}
+.field { display:flex; flex-direction:column; gap:3px; }
+.field > span {
+  font-family:var(--ui); font-size:10px; font-weight:600; letter-spacing:.07em;
+  text-transform:uppercase; color:var(--muted);
+}
+.field.compact input { width:5.5rem; }
+.js-max-concurrent { width:5.5rem; }
+
+input, select, button, a.button {
+  font:inherit; font-size:13px; padding:7px 10px;
+  border:1px solid var(--line-strong); border-radius:var(--r-sm);
+  background:var(--surface); color:var(--ink);
+}
+input:hover, select:hover { border-color:var(--navy-3); }
+select { cursor:pointer; }
+
+button, a.button {
+  font-family:var(--ui); font-weight:600; font-size:12.5px; letter-spacing:.015em;
+  background:var(--navy-2); color:#fff; border:1px solid transparent;
+  cursor:pointer; text-decoration:none; display:inline-block;
+  transition:filter .14s, background .14s;
+}
+button:hover, a.button:hover { filter:brightness(1.14); }
+button:disabled { opacity:.55; cursor:not-allowed; filter:none; }
+button.secondary, a.button.secondary {
+  background:var(--surface); color:var(--navy-2); border:1px solid var(--line-strong);
+}
+button.secondary:hover, a.button.secondary:hover { background:var(--surface-2); filter:none; border-color:var(--navy-3); }
+
+.grid-form { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-bottom:10px; }
+.grid-form label {
+  font-family:var(--ui); font-size:10.5px; font-weight:600; letter-spacing:.06em;
+  text-transform:uppercase; color:var(--muted);
+  display:flex; flex-direction:column; gap:4px;
+}
+.grid-form label input, .grid-form label select {
+  font-family:"Source Sans 3",sans-serif; font-size:13px; font-weight:400;
+  letter-spacing:0; text-transform:none; color:var(--ink);
+}
+.investigation-form { grid-template-columns:repeat(2,minmax(0,1fr)); }
+
+/* ---------------------------- cards ---------------------------- */
+/* .card is also injected by app.js — keep it generic and self-contained. */
+.card {
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r-sm);
+  padding:11px 12px; margin-bottom:9px; font-size:13px; color:var(--body);
+}
+.card img {
+  width:100%; max-height:110px; object-fit:contain;
+  background:#111; border-radius:5px; display:block;
+}
+#alerts > .card { border-left:3px solid var(--bad); background:var(--bad-bg); }
+
+/* Injected by app.js: <article class="card observation-card"> */
+.observation-card { margin:0; background:var(--surface-2); }
+.observation-card img { max-height:150px; margin-bottom:8px; }
+
+/* Injected by app.js in recognition diagnostics */
+#recognitionAttempts figure { margin:0 0 9px; }
+#recognitionAttempts figure img { max-height:120px; }
+#recognitionAttempts figcaption {
+  font-size:11.5px; color:var(--muted); margin-top:5px; line-height:1.45;
+}
+
+.evidence-grid {
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+  gap:10px; margin-top:10px;
+}
+/* minmax(0,1fr), not 1fr. A bare `1fr` is `minmax(auto,1fr)`, so a column
+   containing an unbreakable token — `suppressed_pending_validation`, or
+   `openvino:vehicle-attributes-recognition-barrier-0042` — cannot shrink below
+   that token's width and crushes its neighbour to a sliver. That is exactly
+   what happened once the developer card started printing the raw attribute
+   source. The wrap rule below is the other half: without it the column shrinks
+   but the token is clipped instead. */
+.vehicle-grid {
+  display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:7px 12px; font-size:13px;
+}
+.vehicle-grid > * { min-width:0; overflow-wrap:anywhere; }
+.vehicle-grid .k {
+  display:block; font-family:var(--ui); font-size:9.5px; font-weight:600;
+  letter-spacing:.07em; text-transform:uppercase; color:var(--muted);
+}
+.vehicle-grid b { font-size:15px; color:var(--ink); font-variant-numeric:tabular-nums; }
+
+/* ---------------------------- table ---------------------------- */
+.table-wrap {
+  max-height:340px; overflow:auto;
+  border:1px solid var(--line); border-radius:var(--r-sm); margin-bottom:9px;
+}
+table { width:100%; border-collapse:collapse; font-size:11.5px; }
+thead th {
+  position:sticky; top:0; z-index:1;
+  text-align:left; font-family:var(--ui); font-size:9.5px; font-weight:600;
+  letter-spacing:.08em; text-transform:uppercase; color:var(--muted);
+  background:var(--surface-2); padding:8px 9px;
+  border-bottom:1px solid var(--line); white-space:nowrap;
+}
+tbody td {
+  padding:7px 9px; border-bottom:1px solid var(--line);
+  vertical-align:top; color:var(--body);
+}
+tbody tr:last-child td { border-bottom:0; }
+tbody tr { cursor:pointer; }
+tbody tr:hover { background:var(--surface-2); }
+.status-connected { color:var(--ok); font-weight:600; }
+.status-blocked   { color:var(--bad); font-weight:600; }
+
+pre.card {
+  white-space:pre-wrap; word-break:break-word; font-family:var(--mono);
+  font-size:11.5px; background:var(--surface-2); color:var(--ink);
+}
+
+/* ---------------------------- map preview ---------------------------- */
+/* #previewBox must stay above Leaflet panes (which reach z-index 400/600). */
+.preview {
+  position:absolute; right:12px; bottom:12px; width:320px; z-index:500;
+  background:#0E1729; color:#fff; padding:9px; border-radius:var(--r-sm);
+  border:1px solid rgba(255,255,255,.14); box-shadow:0 8px 28px rgba(0,0,0,.4);
+}
+.preview .row { margin-bottom:7px; justify-content:space-between; }
+.preview video, .preview img {
+  width:100%; max-height:180px; background:#000; object-fit:contain;
+  border-radius:5px; display:block;
+}
+.preview img.hidden, .preview video.hidden { display:none !important; }
+.preview .muted { color:#9FB2CE; font-size:11px; margin:7px 0 0; line-height:1.45; }
+.preview b { font-family:var(--ui); font-size:13px; }
+
+/* ---------------------------- responsive ---------------------------- */
+@media (max-width:1100px) {
+  .layout { grid-template-columns:1fr; }
+  .map-wrap { position:relative; top:0; height:420px; min-height:420px; }
+  #map { min-height:420px; }
+}
+@media (max-width:860px) {
+  .shell { grid-template-columns:1fr; }
+  .rail {
+    position:static; height:auto; flex-direction:row; align-items:center;
+    gap:12px; overflow-x:auto; padding:10px 14px;
+  }
+  .navgroup { flex-direction:row; gap:3px; }
+  .navlabel, .rail-foot, .brand-sub { display:none; }
+  .navitem { white-space:nowrap; padding:7px 10px; }
+  .navitem span { display:none; }
+  .navitem.on span { display:inline; }
+}
+@media (max-width:600px) {
+  .layout { padding:12px 14px 20px; }
+  .topbar, .banner, .stats { padding-left:14px; padding-right:14px; }
+  .demo, .hunt { padding-left:14px; padding-right:14px; }
+  .notice { margin-left:14px; margin-right:14px; }
+  .grid-form, .investigation-form, .vehicle-grid { grid-template-columns:1fr; }
+  .evidence-grid { grid-template-columns:1fr; }
+  .preview { width:auto; left:12px; right:12px; }
+}
+
+/* ---- Attribute trust states -------------------------------------------
+   verified / estimated / unknown must be distinguishable at a glance and
+   without relying on colour alone (border weight + explicit text label). */
+.attr-badge {
+  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .06em;
+  padding: 1px 6px; border-radius: 3px; vertical-align: middle; margin-left: 4px;
+}
+.attr-verified  { background: #1b5e20; color: #fff; }
+.attr-estimated { background: #8a6d00; color: #fff; }
+.attr-unknown   { background: #4a4a4a; color: #ddd; }
+
+.attr-row { padding-left: 8px; border-left: 3px solid transparent; }
+.attr-row-verified  { border-left-color: #1b5e20; }
+.attr-row-estimated { border-left-color: #c79a00; background: rgba(199, 154, 0, .06); }
+.attr-row-unknown   { border-left-color: #4a4a4a; opacity: .78; }
+.attr-row-unknown b { font-style: italic; font-weight: 500; }
+
+.search-warning {
+  margin-top: 8px; padding: 7px 10px; border-left: 3px solid #c79a00;
+  background: rgba(199, 154, 0, .1); font-size: 12px; line-height: 1.45;
+}
+.filter-note { display: block; margin-top: 3px; font-size: 11px; color: #8a6d00; line-height: 1.35; }
+
+.limitations {
+  margin-top: 10px; padding: 10px 12px; border: 1px solid #d6ccae;
+  background: #fdfaf0; font-size: 12px;
+}
+.limitations h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+.limitations ul { margin: 6px 0 0; padding-left: 18px; }
+.limitations li { margin-bottom: 3px; line-height: 1.45; }
+.limits-table { border-collapse: collapse; margin-bottom: 4px; }
+.limits-table th, .limits-table td { padding: 2px 12px 2px 0; text-align: left; }
+.limits-table th { font-size: 11px; color: #666; font-weight: 600; }
+.limits-bad td { color: #8c2f0d; }
+
+.review-box { margin-top: 8px; font-size: 12px; }
+.review-box summary { cursor: pointer; color: #2c5282; }
+.review-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-top: 6px; }
+.review-grid label { display: flex; flex-direction: column; font-size: 11px; }
+
+/* ---- Bulk labelling (label.js) ---------------------------------------
+   Keyboard-first: every chip prints its key, so the map is on screen and
+   does not have to be memorised. */
+.lb-card { display:flex; flex-direction:column; gap:12px; }
+.lb-main { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:14px; align-items:start; }
+.lb-crop { margin:0; }
+.lb-crop img {
+  width:100%; max-height:340px; object-fit:contain;
+  background:#0E1420; border-radius:6px; display:block;
+}
+.lb-crop figcaption { font-size:11.5px; margin-top:6px; line-height:1.45; }
+
+.lb-model {
+  border:1px solid var(--line); border-radius:6px; padding:10px 12px;
+  background:var(--surface-2); display:flex; flex-direction:column; gap:7px; font-size:12.5px;
+}
+.lb-model .k { margin-right:6px; }
+.lb-model b { font-size:15px; color:var(--ink); margin-right:6px; }
+.lb-model-blind { color:var(--muted); font-style:italic; }
+.lb-probs { display:flex; flex-wrap:wrap; gap:6px; }
+.lb-prob {
+  display:inline-flex; align-items:center; gap:5px;
+  font-family:var(--mono); font-size:10.5px; color:var(--muted);
+}
+.lb-prob i { display:inline-block; height:7px; background:var(--navy-3); border-radius:2px; }
+
+.lb-keys { display:flex; flex-direction:column; gap:7px; }
+.lb-row { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+.lb-row > .k {
+  width:70px; flex:none; font-family:var(--ui); font-size:9.5px; font-weight:600;
+  letter-spacing:.07em; text-transform:uppercase; color:var(--muted);
+}
+.lb-chip {
+  display:inline-flex; align-items:center; gap:5px;
+  background:var(--surface); color:var(--ink); border:1px solid var(--line-strong);
+  border-radius:5px; padding:4px 8px; font-size:12px; font-weight:400; cursor:pointer;
+}
+.lb-chip:hover { border-color:var(--navy-3); background:var(--surface-2); filter:none; }
+.lb-chip.on { background:var(--navy-2); color:#fff; border-color:var(--navy-2); font-weight:600; }
+.lb-chip kbd {
+  font-family:var(--mono); font-size:10px; font-weight:700;
+  background:var(--surface-3, #ECF0F7); color:var(--navy-2);
+  border:1px solid var(--line); border-radius:3px; padding:0 4px; min-width:14px; text-align:center;
+}
+.lb-chip.on kbd { background:rgba(255,255,255,.22); color:#fff; border-color:transparent; }
+
+@media (max-width:1100px) { .lb-main { grid-template-columns:1fr; } }
+
+/* Labelling takes the whole width: the crop is the work surface, and the map
+   is irrelevant while labelling. */
+.layout.layout-wide { grid-template-columns:1fr; }
+.layout.layout-wide .map-wrap { display:none; }

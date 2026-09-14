@@ -10,12 +10,31 @@ from app.models import Alert, Camera, Sighting, SystemState
 from app.security import redact_url
 
 
+#: The own feed is the synthetic source this host generates
+#: (scripts/generate_own_feed.py): frames on disk, not a live stream.
+OWN_FEED_SOURCE_TYPES = ("image_dir", "file")
+
+
 def camera_origin(camera: Camera) -> str:
     if camera.catalogue_camera_id:
         return "government_catalogue"
-    if camera.source_type in {"image_dir", "file"}:
+    if camera.source_type in OWN_FEED_SOURCE_TYPES:
         return "own_feed"
     return "local_registry"
+
+
+def feed_of(camera: Camera | None) -> str:
+    """Which of the two demonstration paths a camera belongs to.
+
+    Coarser than ``camera_origin``: a ``local_registry`` camera is a registered
+    camera like any government one, so it counts with them. This is what the
+    production console labels and filters on, and it has an exact SQL twin in
+    ``vehicle_observations._feed_clause`` -- change one and change the other.
+    """
+    if camera is None:
+        return "government"
+    is_own = not camera.catalogue_camera_id and camera.source_type in OWN_FEED_SOURCE_TYPES
+    return "own" if is_own else "government"
 
 
 def coverage(db: Session, *, open_captures: int = 0, preview_count: int = 0, queued: int = 0) -> dict:

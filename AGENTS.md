@@ -17,6 +17,19 @@ Read `docs/FOUR_DAY_P0_PLAN.md` before editing.
 - Do **not** claim 50 cameras healthy unless analytics is actually running.
 - Do **not** copy patent claims. Independent character-consistency vote only.
 - Mock UIs are disallowed. Every alert must come from a persisted sighting row.
+- Vehicle type and colour come **only** from `app/services/vehicle_attributes.py` (OpenVINO
+  OMZ `vehicle-attributes-recognition-barrier-0042`, Apache-2.0). Never an LLM or VLM — not
+  for type, not for colour, not for plate text. Plate text comes only from `cpu_anpr.py`.
+- Supported classes are `car/van/truck/bus` (+ `two_wheeler` from COCO id 3) and
+  `white/gray/yellow/red/green/blue/black`. `suv`, `auto_rickshaw`, `taxi_cab`, `silver`,
+  `brown` and `orange` have **no supporting weight** and must stay `unknown`. Do not map
+  `gray`→`silver` or promote `car`→`suv`.
+- Detection/type/colour must keep working when ANPR is off or fails. A plate failure may
+  never discard a vehicle observation or alter its attributes.
+- Prefer abstention. `unknown` is a decision the gate made, not a missing value, and an
+  abstained record must report confidence `0.0`.
+- No accuracy has been measured on Indian CCTV. Do not quote the vendor's barrier-dataset
+  figures as if they described this deployment.
 
 ## Day-1 question
 

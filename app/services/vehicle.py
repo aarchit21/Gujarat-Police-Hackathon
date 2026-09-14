@@ -68,6 +68,7 @@ def vehicle_day(
                 **sighting_json(s),
                 "lat": cam.lat if cam else None,
                 "lng": cam.lng if cam else None,
+                "camera_name": cam.name if cam else None,
                 "city": cam.city if cam else None,
                 "department": cam.department if cam else None,
             }

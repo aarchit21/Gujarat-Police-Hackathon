@@ -6,6 +6,7 @@ catalogue stream at once and is not a central VMS.
 """
 from __future__ import annotations
 
+import random
 import uuid
 from datetime import datetime, timezone
 
@@ -27,18 +28,83 @@ def slot_count() -> int:
     return max(1, int(settings.max_concurrent_workers or 4))
 
 
-def decode_ok_pin_ids(db: Session, n: int | None = None) -> list[str]:
-    """First N decode-ok live cameras, then untested, filling the chosen capture slots."""
+def _rotation_key(cam: Camera, rng: random.Random) -> tuple:
+    """Order within a decode tier: least-recently-hunted first, random tiebreak.
+
+    Selection used to be `sorted by id`, with PIN_DEFAULT forced to the front,
+    so every click pinned cam01/02/03/05 and the rest of the catalogue was
+    never visited. Ordering by ``last_hunted_at`` (never-hunted first) rotates
+    fairly across clicks, and the random tiebreak stops equal timestamps from
+    collapsing back to alphabetical order.
+    """
+    never_hunted = cam.last_hunted_at is None
+    last = cam.last_hunted_at.timestamp() if cam.last_hunted_at else 0.0
+    return (0 if never_hunted else 1, last, rng.random())
+
+
+def decode_ok_pin_ids(db: Session, n: int | None = None, *, rng: random.Random | None = None) -> list[str]:
+    """Fill the capture slots, preferring decode-ok and least-recently-hunted.
+
+    Decode tiers are kept because pinning a known-dead camera wastes a slot:
+    ok -> untested -> failed. Rotation happens *within* each tier.
+    """
     count = max(1, int(n if n is not None else slot_count()))
     cams = hunt_targets(db, pinned_only=False)
-    ok = [c.id for c in cams if c.decode_status == "ok"]
-    rest = [c.id for c in cams if c.id not in ok]
-    return (ok + rest)[:count]
+    mode = str(getattr(settings, "hunt_rotation", "least_recent") or "least_recent").lower()
+    if mode == "fixed":
+        ok = [c.id for c in cams if c.decode_status == "ok"]
+        rest = [c.id for c in cams if c.id not in ok]
+        return (ok + rest)[:count]
+
+    seed = int(getattr(settings, "hunt_pin_seed", 0) or 0)
+    rng = rng or (random.Random(seed) if seed else random.Random())
+
+    tiers: dict[int, list[Camera]] = {0: [], 1: [], 2: []}
+    for cam in cams:
+        status = (cam.decode_status or "untested").lower()
+        tiers[0 if status == "ok" else 1 if status == "untested" else 2].append(cam)
+
+    for tier in (0, 1, 2):
+        if mode == "random":
+            rng.shuffle(tiers[tier])
+        else:
+            tiers[tier].sort(key=lambda c: _rotation_key(c, rng))
+
+    # Explore / exploit. Strict tiering alone is a trap: an untested camera is
+    # never given a slot, so it stays untested forever and the same handful of
+    # decode-ok cameras is pinned on every click. Reserving part of the slots
+    # for untested cameras lets repeated clicks work through the catalogue and
+    # actually fill in decode_status.
+    explore = float(getattr(settings, "hunt_explore_fraction", 0.5) or 0.0)
+    explore_slots = min(len(tiers[1]), int(round(count * max(0.0, min(1.0, explore)))))
+    exploit_slots = count - explore_slots
+
+    chosen = [c.id for c in tiers[0][:exploit_slots]]
+    chosen += [c.id for c in tiers[1][:explore_slots]]
+
+    # Backfill if either pool ran short, so slots are never left idle.
+    if len(chosen) < count:
+        taken = set(chosen)
+        for tier in (0, 1, 2):
+            for cam in tiers[tier]:
+                if len(chosen) >= count:
+                    break
+                if cam.id not in taken:
+                    chosen.append(cam.id)
+                    taken.add(cam.id)
+    return chosen[:count]
 
 
-def hunt_targets(db: Session, *, pinned_only: bool = False, pin_ids: list[str] | None = None) -> list[Camera]:
+def hunt_targets(
+    db: Session,
+    *,
+    pinned_only: bool = False,
+    pin_ids: list[str] | None = None,
+    rng: random.Random | None = None,
+) -> list[Camera]:
     rows = list(db.scalars(select(Camera).order_by(Camera.id)))
-    allow = {str(x).strip() for x in (pin_ids or PIN_DEFAULT) if str(x).strip()}
+    explicit = [str(x).strip() for x in (pin_ids or []) if str(x).strip()]
+    allow = set(explicit) or {str(x).strip() for x in PIN_DEFAULT}
     out = []
     for cam in rows:
         if not cam.catalogue_live and camera_origin(cam) != "government_catalogue":
@@ -48,13 +114,31 @@ def hunt_targets(db: Session, *, pinned_only: bool = False, pin_ids: list[str] |
         if pinned_only and cam.id not in allow:
             continue
         out.append(cam)
-    out.sort(
-        key=lambda c: (
-            0 if c.id in allow else 1,
-            0 if c.decode_status == "ok" else 1 if (c.decode_status or "untested") == "untested" else 2,
-            c.id,
-        )
-    )
+
+    def tier(cam: Camera) -> int:
+        status = (cam.decode_status or "untested").lower()
+        return 0 if status == "ok" else 1 if status == "untested" else 2
+
+    if explicit:
+        # An operator named these cameras; honour that order exactly.
+        rank = {cid: i for i, cid in enumerate(explicit)}
+        out.sort(key=lambda c: (rank.get(c.id, len(rank)), tier(c), c.id))
+        return out
+
+    mode = str(getattr(settings, "hunt_rotation", "least_recent") or "least_recent").lower()
+    if mode == "fixed":
+        # Legacy behaviour: PIN_DEFAULT first, then alphabetical. This is what
+        # made every hunt start at cam01-cam05 and never reach the rest.
+        out.sort(key=lambda c: (0 if c.id in allow else 1, tier(c), c.id))
+        return out
+
+    seed = int(getattr(settings, "hunt_pin_seed", 0) or 0)
+    rng = rng or (random.Random(seed) if seed else random.Random())
+    if mode == "random":
+        rng.shuffle(out)
+        out.sort(key=tier)
+    else:
+        out.sort(key=lambda c: (tier(c), *_rotation_key(c, rng)))
     return out
 
 

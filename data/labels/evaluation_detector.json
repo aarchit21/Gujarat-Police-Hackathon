@@ -1,0 +1,573 @@
+{
+  "manifest": "data/labels/tracks.jsonl",
+  "predictions": [
+    "data/runs/offline_detector/observations.jsonl",
+    "data/runs/final_detector/observations.jsonl"
+  ],
+  "tracks_labelled": 59,
+  "annotator": "claude-opus-5 (blind: labelled from prediction-free contact sheets)",
+  "vehicle_type": {
+    "supported_classes": {
+      "n": 25,
+      "coverage": 0.92,
+      "selective_precision": 0.5217,
+      "correct": 12,
+      "answered": 23
+    },
+    "unsupported_classes": {
+      "n": 11,
+      "correct_abstention_rate": 0.5455,
+      "false_attributions": 5,
+      "false_attribution_examples": [
+        {
+          "truth": "auto_rickshaw",
+          "predicted": "truck"
+        },
+        {
+          "truth": "suv",
+          "predicted": "truck"
+        },
+        {
+          "truth": "suv",
+          "predicted": "car"
+        },
+        {
+          "truth": "auto_rickshaw",
+          "predicted": "truck"
+        },
+        {
+          "truth": "auto_rickshaw",
+          "predicted": "car"
+        }
+      ]
+    },
+    "per_class": {
+      "bus": {
+        "precision": 0.8,
+        "recall": 0.5333,
+        "f1": 0.64,
+        "support": 15
+      },
+      "car": {
+        "precision": 0.5714,
+        "recall": 0.5,
+        "f1": 0.5333,
+        "support": 8
+      },
+      "truck": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 1
+      },
+      "van": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 1
+      }
+    },
+    "macro_f1": 0.2933,
+    "confusion": {
+      "auto_rickshaw": {
+        "auto_rickshaw": 0,
+        "bus": 0,
+        "car": 1,
+        "suv": 0,
+        "truck": 2,
+        "unknown": 4,
+        "van": 0
+      },
+      "bus": {
+        "auto_rickshaw": 0,
+        "bus": 8,
+        "car": 0,
+        "suv": 0,
+        "truck": 6,
+        "unknown": 1,
+        "van": 0
+      },
+      "car": {
+        "auto_rickshaw": 0,
+        "bus": 1,
+        "car": 4,
+        "suv": 0,
+        "truck": 0,
+        "unknown": 1,
+        "van": 2
+      },
+      "suv": {
+        "auto_rickshaw": 0,
+        "bus": 0,
+        "car": 1,
+        "suv": 0,
+        "truck": 1,
+        "unknown": 2,
+        "van": 0
+      },
+      "truck": {
+        "auto_rickshaw": 0,
+        "bus": 1,
+        "car": 0,
+        "suv": 0,
+        "truck": 0,
+        "unknown": 0,
+        "van": 0
+      },
+      "unknown": {
+        "auto_rickshaw": 0,
+        "bus": 0,
+        "car": 0,
+        "suv": 0,
+        "truck": 0,
+        "unknown": 0,
+        "van": 0
+      },
+      "van": {
+        "auto_rickshaw": 0,
+        "bus": 0,
+        "car": 1,
+        "suv": 0,
+        "truck": 0,
+        "unknown": 0,
+        "van": 0
+      }
+    },
+    "excluded_unclear": 14,
+    "unmatched_tracks": 9,
+    "threshold_sweep": [
+      {
+        "min_prob": 0.05,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.1,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.15,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.2,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.25,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.3,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.35,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.4,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.45,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.5,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.55,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.6,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.65,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.7,
+        "coverage": 0.92,
+        "selective_precision": 0.3478,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.75,
+        "coverage": 0.8,
+        "selective_precision": 0.3,
+        "answered": 20
+      },
+      {
+        "min_prob": 0.8,
+        "coverage": 0.72,
+        "selective_precision": 0.2778,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.85,
+        "coverage": 0.68,
+        "selective_precision": 0.2941,
+        "answered": 17
+      },
+      {
+        "min_prob": 0.9,
+        "coverage": 0.56,
+        "selective_precision": 0.2143,
+        "answered": 14
+      },
+      {
+        "min_prob": 0.95,
+        "coverage": 0.52,
+        "selective_precision": 0.2308,
+        "answered": 13
+      }
+    ],
+    "by_video": {
+      "final": {
+        "n": 5,
+        "coverage": 1.0,
+        "selective_precision": 0.6,
+        "correct": 3,
+        "answered": 5
+      },
+      "offline": {
+        "n": 20,
+        "coverage": 0.9,
+        "selective_precision": 0.5,
+        "correct": 9,
+        "answered": 18
+      }
+    }
+  },
+  "vehicle_color": {
+    "supported_classes": {
+      "n": 33,
+      "coverage": 0.7879,
+      "selective_precision": 0.7692,
+      "correct": 20,
+      "answered": 26
+    },
+    "unsupported_classes": {
+      "n": 3,
+      "correct_abstention_rate": 0.0,
+      "false_attributions": 3,
+      "false_attribution_examples": [
+        {
+          "truth": "silver",
+          "predicted": "red"
+        },
+        {
+          "truth": "silver",
+          "predicted": "white"
+        },
+        {
+          "truth": "orange",
+          "predicted": "yellow"
+        }
+      ]
+    },
+    "per_class": {
+      "black": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 0
+      },
+      "blue": {
+        "precision": 1.0,
+        "recall": 0.875,
+        "f1": 0.9333,
+        "support": 8
+      },
+      "green": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 1
+      },
+      "red": {
+        "precision": 0.1667,
+        "recall": 1.0,
+        "f1": 0.2857,
+        "support": 1
+      },
+      "white": {
+        "precision": 0.9,
+        "recall": 0.5,
+        "f1": 0.6429,
+        "support": 18
+      },
+      "yellow": {
+        "precision": 0.75,
+        "recall": 0.6,
+        "f1": 0.6667,
+        "support": 5
+      }
+    },
+    "macro_f1": 0.5057,
+    "confusion": {
+      "black": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "orange": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 0,
+        "white": 0,
+        "yellow": 0
+      },
+      "blue": {
+        "black": 0,
+        "blue": 7,
+        "green": 0,
+        "orange": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 1,
+        "white": 0,
+        "yellow": 0
+      },
+      "green": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "orange": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 1,
+        "white": 0,
+        "yellow": 0
+      },
+      "orange": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "orange": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 0,
+        "white": 0,
+        "yellow": 1
+      },
+      "red": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "orange": 0,
+        "red": 1,
+        "silver": 0,
+        "unknown": 0,
+        "white": 0,
+        "yellow": 0
+      },
+      "silver": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "orange": 0,
+        "red": 1,
+        "silver": 0,
+        "unknown": 0,
+        "white": 1,
+        "yellow": 0
+      },
+      "unknown": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "orange": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 0,
+        "white": 0,
+        "yellow": 0
+      },
+      "white": {
+        "black": 1,
+        "blue": 0,
+        "green": 0,
+        "orange": 0,
+        "red": 4,
+        "silver": 0,
+        "unknown": 4,
+        "white": 9,
+        "yellow": 0
+      },
+      "yellow": {
+        "black": 1,
+        "blue": 0,
+        "green": 0,
+        "orange": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 1,
+        "white": 0,
+        "yellow": 3
+      }
+    },
+    "excluded_unclear": 14,
+    "unmatched_tracks": 9,
+    "threshold_sweep": [
+      {
+        "min_prob": 0.05,
+        "coverage": 0.8788,
+        "selective_precision": 0.7241,
+        "answered": 29
+      },
+      {
+        "min_prob": 0.1,
+        "coverage": 0.8788,
+        "selective_precision": 0.7241,
+        "answered": 29
+      },
+      {
+        "min_prob": 0.15,
+        "coverage": 0.8788,
+        "selective_precision": 0.7241,
+        "answered": 29
+      },
+      {
+        "min_prob": 0.2,
+        "coverage": 0.8788,
+        "selective_precision": 0.7241,
+        "answered": 29
+      },
+      {
+        "min_prob": 0.25,
+        "coverage": 0.8788,
+        "selective_precision": 0.7241,
+        "answered": 29
+      },
+      {
+        "min_prob": 0.3,
+        "coverage": 0.8788,
+        "selective_precision": 0.7241,
+        "answered": 29
+      },
+      {
+        "min_prob": 0.35,
+        "coverage": 0.8788,
+        "selective_precision": 0.7241,
+        "answered": 29
+      },
+      {
+        "min_prob": 0.4,
+        "coverage": 0.8788,
+        "selective_precision": 0.7241,
+        "answered": 29
+      },
+      {
+        "min_prob": 0.45,
+        "coverage": 0.8485,
+        "selective_precision": 0.75,
+        "answered": 28
+      },
+      {
+        "min_prob": 0.5,
+        "coverage": 0.8182,
+        "selective_precision": 0.7407,
+        "answered": 27
+      },
+      {
+        "min_prob": 0.55,
+        "coverage": 0.7879,
+        "selective_precision": 0.7692,
+        "answered": 26
+      },
+      {
+        "min_prob": 0.6,
+        "coverage": 0.7576,
+        "selective_precision": 0.76,
+        "answered": 25
+      },
+      {
+        "min_prob": 0.65,
+        "coverage": 0.6667,
+        "selective_precision": 0.8182,
+        "answered": 22
+      },
+      {
+        "min_prob": 0.7,
+        "coverage": 0.6667,
+        "selective_precision": 0.8182,
+        "answered": 22
+      },
+      {
+        "min_prob": 0.75,
+        "coverage": 0.6061,
+        "selective_precision": 0.8,
+        "answered": 20
+      },
+      {
+        "min_prob": 0.8,
+        "coverage": 0.6061,
+        "selective_precision": 0.8,
+        "answered": 20
+      },
+      {
+        "min_prob": 0.85,
+        "coverage": 0.5758,
+        "selective_precision": 0.7895,
+        "answered": 19
+      },
+      {
+        "min_prob": 0.9,
+        "coverage": 0.4545,
+        "selective_precision": 0.8,
+        "answered": 15
+      },
+      {
+        "min_prob": 0.95,
+        "coverage": 0.3333,
+        "selective_precision": 0.7273,
+        "answered": 11
+      }
+    ],
+    "by_video": {
+      "final": {
+        "n": 6,
+        "coverage": 0.8333,
+        "selective_precision": 0.6,
+        "correct": 3,
+        "answered": 5
+      },
+      "offline": {
+        "n": 27,
+        "coverage": 0.7778,
+        "selective_precision": 0.8095,
+        "correct": 17,
+        "answered": 21
+      }
+    }
+  }
+}

@@ -323,11 +323,14 @@ class FrameProcessor:
         self._last_cloud_queue = 0.0
         self.tracker = PlateTrackManager(camera.id, self.run_id)
         self.vehicle_tracker = PlateTrackManager(camera.id, f"{self.run_id}-vehicle")
+        # Per-track attribute evidence, keyed by vehicle track id.
+        self.attribute_tracks: dict[str, object] = {}
 
     def reset_passage(self, pts_ms: float | None, reason: str) -> None:
         self.raws.clear()
         self.tracker.reset()
         self.vehicle_tracker.reset()
+        self.attribute_tracks.clear()
         self.sampler.reset()
         self.passage_logged_unreadable = False
         self.unreadable_tracks.clear()
@@ -338,6 +341,58 @@ class FrameProcessor:
                 detail=json.dumps({"camera_id": self.camera.id, "pts_ms": pts_ms, "reason": reason, "events": self.clock.events[-3:]}),
             )
         )
+
+    def observe_attributes(self, *, observation, track_id, frame, box, det, frame_index, pts_ms,
+                           frame_boxes=None) -> None:
+        """Score this crop, classify it if it is good enough, and re-aggregate.
+
+        Runs the OpenVINO attribute model locally. Never calls an LLM or VLM,
+        and never blocks the frame loop on a network request. A failure here
+        leaves the observation in place with its existing attributes.
+        """
+        if not settings.vattr_enabled:
+            return
+        from app.services.crop_quality import score_crop
+        from app.services.track_aggregate import CropObservation, TrackAccumulator
+        from app.services.vehicle_attributes import classify_crop, extend_box
+        from app.services.vehicle_observations import apply_attributes
+
+        accumulator = self.attribute_tracks.get(track_id)
+        if accumulator is None:
+            accumulator = TrackAccumulator(track_id)
+            self.attribute_tracks[track_id] = accumulator
+        accumulator.note_frame(frame_index, pts_ms)
+
+        x1, y1, x2, y2 = extend_box(box, frame.shape)
+        body = frame[y1:y2, x1:x2]
+        quality = score_crop(
+            body, box=box, frame_shape=frame.shape, detector_confidence=det.confidence,
+            crop_box=(x1, y1, x2 - x1, y2 - y1), other_boxes=frame_boxes,
+        )
+        if not quality.eligible:
+            accumulator.reject(quality.reason)
+            return
+        candidate = CropObservation(
+            frame_index=frame_index, pts_ms=pts_ms, quality=quality,
+            detector_type=det.vehicle_type, detector_confidence=float(det.confidence or 0.0),
+            crop=body.copy(), box=box,
+        )
+        if not accumulator.offer(candidate):
+            return
+        try:
+            for pending in accumulator.needs_attributes():
+                if pending.crop is not None:
+                    pending.attributes = classify_crop(pending.crop)
+        except Exception as exc:
+            count_event("vehicle_attribute_error")
+            self.db.add(AuditEvent(
+                action="vehicle_attribute_error",
+                detail=json.dumps({"camera_id": self.camera.id, "track_id": track_id, "error": str(exc)[:200]}),
+            ))
+            return
+        # Provisional while the track is live; it is re-written on each better
+        # crop and settles once the track stops producing them.
+        apply_attributes(self.db, observation.id, accumulator.aggregate())
 
     def push(self, frame_index: int, bgr, pts_ms: float | None) -> Sighting | None:
         self.seen += 1
@@ -369,6 +424,11 @@ class FrameProcessor:
         # representative record per local track.
         vehicle_rows = []
         detections = detect_vehicles(small, max_detections=settings.vehicle_max_detections)
+        # Native-pixel boxes for every vehicle in this frame, so each crop can
+        # be checked for how much of a *different* vehicle it contains.
+        frame_boxes = [
+            scale_box((d.x1, d.y1, d.x2 - d.x1, d.y2 - d.y1), scale) for d in detections
+        ]
         for det in detections:
             small_box = (det.x1, det.y1, det.x2 - det.x1, det.y2 - det.y1)
             vehicle_box = scale_box(small_box, scale)
@@ -395,15 +455,19 @@ class FrameProcessor:
             vehicle_rows.append((vehicle_box, observation, det))
             if created:
                 self.vehicle_created += 1
-                if settings.vehicle_attribute_refinement_enabled:
-                    cloud_verifier.enqueue(CloudJob(
-                        kind="vehicle_attribute", camera_id=self.camera.id, run_id=self.run_id,
-                        track_id=vehicle_track, frame_index=frame_index, source_pts_ms=pts_ms,
-                        image=det.crop.copy(), box=vehicle_box, frame_shape=(h, w),
-                        detector="yolov8n", vehicle_type=det.vehicle_type,
-                        vehicle_color=observation.vehicle_color, priority=float(det.confidence or 0.0),
-                        observation_id=observation.id,
-                    ))
+            # Deterministic attributes, computed locally on quality-gated crops
+            # and aggregated across the track. This replaces the Ollama VLM
+            # refinement job that used to be enqueued here.
+            self.observe_attributes(
+                observation=observation,
+                track_id=vehicle_track,
+                frame=bgr,
+                box=vehicle_box,
+                det=det,
+                frame_index=frame_index,
+                pts_ms=pts_ms,
+                frame_boxes=frame_boxes,
+            )
         if detections:
             boosted_fps = max(
                 self.fps,

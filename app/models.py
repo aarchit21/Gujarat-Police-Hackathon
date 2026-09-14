@@ -171,6 +171,15 @@ class VehicleObservation(Base):
     vehicle_color: Mapped[str] = mapped_column(String(32), default="unknown", index=True)
     color_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     color_source: Mapped[str] = mapped_column(String(48), default="local")
+    # Human verification. These never overwrite the raw model output, which
+    # stays in metadata_json["attributes"] for diagnostics; the operational
+    # vehicle_type / vehicle_color columns above are derived from them.
+    verified_vehicle_type: Mapped[str] = mapped_column(String(32), default="", index=True)
+    verified_vehicle_color: Mapped[str] = mapped_column(String(32), default="")
+    verified_by: Mapped[str] = mapped_column(String(64), default="")
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # unreviewed | verified. Estimated attributes always require review.
+    review_status: Mapped[str] = mapped_column(String(24), default="unreviewed", index=True)
     evidence_path: Mapped[str] = mapped_column(Text, default="")
     context_evidence_path: Mapped[str] = mapped_column(Text, default="")
     metadata_json: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)

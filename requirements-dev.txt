@@ -1,0 +1,15 @@
+# Development and documentation tooling. NOT needed to run the platform.
+#
+#   python -m pip install -r requirements-dev.txt
+#
+# Used for the browser-driven UI checks and for regenerating the submission
+# documents in final_report/.
+
+# Browser automation for the UI verification scripts.
+# After installing, fetch the browser once:  python -m playwright install chromium
+playwright>=1.48
+
+# Submission document generation (final_report/_build_*.py).
+python-pptx>=1.0
+python-docx>=1.1
+matplotlib>=3.8

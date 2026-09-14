@@ -113,39 +113,15 @@ def _process_job(job: CloudJob) -> None:
 
     started = time.perf_counter()
     if job.kind == "vehicle_attribute":
-        from app.services.vehicle_observations import apply_refinement
-
-        enhanced, enhancement = enhance_for_vision(job.image, profile="vehicle", min_width=320)
-        payload = infer_vehicle(
-            enhanced,
-            camera_id=job.camera_id,
-            prepared=True,
-            enhancement=enhancement,
-            model=settings.vehicle_attribute_model,
-            attributes_only=True,
+        # Retired. Vehicle type and colour came from an Ollama VLM here, which
+        # produced unsupported attributes (and, on this host, 137 consecutive
+        # authentication failures). They are now computed deterministically and
+        # synchronously by app/services/vehicle_attributes.py (OpenVINO), so no
+        # vehicle attribute work may be queued to a cloud model.
+        raise RuntimeError(
+            "cloud vehicle_attribute jobs are retired; vehicle type and colour "
+            "come from vehicle_attributes.py (OpenVINO), never from a VLM"
         )
-        latency = (time.perf_counter() - started) * 1000.0
-        db = SessionLocal()
-        try:
-            if db.get(Camera, job.camera_id) is None or not job.observation_id:
-                return
-            apply_refinement(db, job.observation_id, payload)
-            add_attempt(
-                db, camera_id=job.camera_id, run_id=job.run_id, track_id=job.track_id,
-                frame_index=job.frame_index, source_pts_ms=job.source_pts_ms,
-                stage="vehicle_attribute", reason_code="attribute_refined" if payload.get("vehicle_type") or payload.get("vehicle_color") else "attribute_empty",
-                detector=job.detector, recognizer="ollama_vehicle_attribute",
-                model_id=payload.get("model_id") or "", box=job.box, quality=job.quality,
-                raw_output=payload.get("raw_response") or "", confidence=float(payload.get("confidence") or 0.0),
-                latency_ms=latency, accepted=False,
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
-        return
     if job.kind == "vision_only":
         payload = infer_vision_only_frame(job.image, camera_id=job.camera_id)
         evidence_image = payload.pop("_evidence_bgr", None)

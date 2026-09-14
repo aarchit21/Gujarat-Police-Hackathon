@@ -60,7 +60,19 @@ SIGHTING_COLUMNS = {
     "vehicle_observation_id": ("INTEGER", "INTEGER"),
 }
 
+# Human verification of vehicle attributes. Additive only; the raw model
+# output stays in metadata_json and is never dropped.
+VEHICLE_OBSERVATION_COLUMNS = {
+    "verified_vehicle_type": ("VARCHAR(32) DEFAULT ''", "VARCHAR(32) DEFAULT ''"),
+    "verified_vehicle_color": ("VARCHAR(32) DEFAULT ''", "VARCHAR(32) DEFAULT ''"),
+    "verified_by": ("VARCHAR(64) DEFAULT ''", "VARCHAR(64) DEFAULT ''"),
+    "verified_at": ("TIMESTAMPTZ", "DATETIME"),
+    "review_status": ("VARCHAR(24) DEFAULT 'unreviewed'", "VARCHAR(24) DEFAULT 'unreviewed'"),
+}
+
 INDEX_SQL = [
+    "CREATE INDEX IF NOT EXISTS ix_vehicle_observations_review_status ON vehicle_observations (review_status)",
+    "CREATE INDEX IF NOT EXISTS ix_vehicle_observations_verified_type ON vehicle_observations (verified_vehicle_type)",
     "CREATE INDEX IF NOT EXISTS ix_cameras_catalogue_camera_id ON cameras (catalogue_camera_id)",
     "CREATE INDEX IF NOT EXISTS ix_sightings_camera_id ON sightings (camera_id)",
     "CREATE INDEX IF NOT EXISTS ix_sightings_plate_norm ON sightings (plate_norm)",
@@ -224,6 +236,7 @@ def apply_migrations(engine: Engine) -> dict:
     added = []
     added.extend(_add_columns(engine, "cameras", CAMERA_COLUMNS))
     added.extend(_add_columns(engine, "sightings", SIGHTING_COLUMNS))
+    added.extend(_add_columns(engine, "vehicle_observations", VEHICLE_OBSERVATION_COLUMNS))
     _postgres_vehicle_jsonb(engine)
     _sqlite_empty_vehicle_json(engine)
     _backfill_vehicle_observations(engine)

@@ -1,15 +1,52 @@
+# Core runtime. Install this first; the app starts and serves the console with
+# only these. The ANPR stack is a separate, optional file (see below).
+#
+#   python -m pip install -r requirements.txt
+#
+# Versions are lower bounds, not pins: this is a reference implementation and
+# the host Python is 3.11. Pin exactly before a production deployment.
+
+# --- API and service layer -------------------------------------------------
 fastapi>=0.115
 uvicorn[standard]>=0.32
-sqlalchemy>=2.0
 pydantic>=2.0
 pydantic-settings>=2.0
-pillow>=10.0
-numpy>=2.0
-opencv-python-headless>=4.10
-pytesseract>=0.3.13
 python-multipart>=0.0.9
 httpx>=0.27
+
+# --- persistence -----------------------------------------------------------
+sqlalchemy>=2.0
+# PostgreSQL driver. SQLite (stdlib) is the development fallback; production
+# uses PostgreSQL + PostGIS.
 psycopg[binary]>=3.2
-pytest>=8.0
-# Optional YOLOv8n vehicle detector. First run downloads yolov8n.pt (~6MB).
+
+# --- imaging and video -----------------------------------------------------
+numpy>=2.0
+pillow>=10.0
+# HEADLESS build only. The GUI build pulls Qt and conflicts with it; if both
+# land in one environment, uninstall opencv-python and reinstall this one.
+opencv-python-headless>=4.10
+
+# --- vehicle detection and tracking ---------------------------------------
+# Ultralytics is AGPL-3.0. Review the licence before a government deployment:
+# either comply with its source-provision terms, buy a commercial licence, or
+# substitute a permissively licensed detector. The detector sits behind an
+# interface in app/services/yolo_detect.py and is replaceable.
+# First run downloads yolov8n.pt (~6 MB).
 ultralytics>=8.3
+# Linear-assignment solver used by the ByteTrack association step.
+lap>=0.5
+
+# --- vehicle type and colour ----------------------------------------------
+# OpenVINO Open Model Zoo `vehicle-attributes-recognition-barrier-0042`
+# (Apache-2.0). Runs on CPU, which leaves the GPU for detection.
+# Fetch the weights with: python scripts/pull_vehicle_attributes.py
+openvino>=2024.0
+
+# --- optional OCR fallback -------------------------------------------------
+# Cross-check for the primary plate recogniser. Needs the tesseract binary:
+#   conda install -c conda-forge "tesseract>=5"
+pytesseract>=0.3.13
+
+# --- tests -----------------------------------------------------------------
+pytest>=8.0

@@ -32,8 +32,8 @@ def test_no_government_download_or_gateway_publish():
     assert "GET_ONLY" in cat
     assert "rtsp://{" not in cat
     assert "DOCUMENTED_RTSP_PREFIX" in cat
-    blob_js = (APP / "static" / "app.js").read_text(encoding="utf-8")
-    assert "CCTV_ACCESS_TOKEN" not in blob_js
+    for js in list((APP / "static").glob("*.js")) + list((APP / "devui").glob("*.js")):
+        assert "CCTV_ACCESS_TOKEN" not in js.read_text(encoding="utf-8"), js
 
 
 def test_configured_token_not_embedded_in_source():
@@ -55,6 +55,26 @@ def test_no_google_directions_client():
     js = (APP / "static" / "app.js").read_text(encoding="utf-8")
     assert "googleapis.com" not in js
     assert "google_maps" not in js
+
+
+def test_production_ui_has_no_embedded_operator_token():
+    """The console asks for the access token; it does not ship one.
+
+    The previous console hard-coded `p0-operator`, which made the operator
+    header decorative and put a credential in a file served to any browser.
+    """
+    for path in (APP / "static").glob("*.js"):
+        text = path.read_text(encoding="utf-8")
+        assert "p0-operator" not in text, path
+        assert 'const TOKEN = "' not in text, path
+
+
+def test_developer_console_is_outside_the_public_static_mount():
+    """/static is served by StaticFiles with no gate. Nothing developer-only
+    may live under it, or the environment flag would be decorative."""
+    assert (APP / "devui" / "console.html").is_file()
+    for path in (APP / "static").rglob("*"):
+        assert "console." not in path.name, f"developer asset served publicly: {path}"
 
 
 def test_protected_rtsp_not_in_public_serializer():

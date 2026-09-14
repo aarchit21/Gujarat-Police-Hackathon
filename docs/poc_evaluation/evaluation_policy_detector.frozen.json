@@ -1,0 +1,523 @@
+{
+  "manifest": "data/labels/tracks.jsonl",
+  "predictions": [
+    "data/runs/pol_detector/observations.jsonl"
+  ],
+  "tracks_labelled": 59,
+  "annotator": "claude-opus-5 (blind: labelled from prediction-free contact sheets)",
+  "vehicle_type": {
+    "supported_classes": {
+      "n": 20,
+      "coverage": 0.9,
+      "selective_precision": 0.5,
+      "correct": 9,
+      "answered": 18
+    },
+    "unsupported_classes": {
+      "n": 8,
+      "correct_abstention_rate": 0.625,
+      "false_attributions": 3,
+      "false_attribution_examples": [
+        {
+          "truth": "auto_rickshaw",
+          "predicted": "truck"
+        },
+        {
+          "truth": "suv",
+          "predicted": "truck"
+        },
+        {
+          "truth": "suv",
+          "predicted": "car"
+        }
+      ]
+    },
+    "per_class": {
+      "bus": {
+        "precision": 0.75,
+        "recall": 0.5,
+        "f1": 0.6,
+        "support": 12
+      },
+      "car": {
+        "precision": 0.6,
+        "recall": 0.5,
+        "f1": 0.5455,
+        "support": 6
+      },
+      "truck": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 1
+      },
+      "van": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 1
+      }
+    },
+    "macro_f1": 0.2864,
+    "confusion": {
+      "auto_rickshaw": {
+        "auto_rickshaw": 0,
+        "bus": 0,
+        "car": 0,
+        "suv": 0,
+        "truck": 1,
+        "unknown": 4,
+        "van": 0
+      },
+      "bus": {
+        "auto_rickshaw": 0,
+        "bus": 6,
+        "car": 0,
+        "suv": 0,
+        "truck": 5,
+        "unknown": 1,
+        "van": 0
+      },
+      "car": {
+        "auto_rickshaw": 0,
+        "bus": 1,
+        "car": 3,
+        "suv": 0,
+        "truck": 0,
+        "unknown": 1,
+        "van": 1
+      },
+      "suv": {
+        "auto_rickshaw": 0,
+        "bus": 0,
+        "car": 1,
+        "suv": 0,
+        "truck": 1,
+        "unknown": 1,
+        "van": 0
+      },
+      "truck": {
+        "auto_rickshaw": 0,
+        "bus": 1,
+        "car": 0,
+        "suv": 0,
+        "truck": 0,
+        "unknown": 0,
+        "van": 0
+      },
+      "unknown": {
+        "auto_rickshaw": 0,
+        "bus": 0,
+        "car": 0,
+        "suv": 0,
+        "truck": 0,
+        "unknown": 0,
+        "van": 0
+      },
+      "van": {
+        "auto_rickshaw": 0,
+        "bus": 0,
+        "car": 1,
+        "suv": 0,
+        "truck": 0,
+        "unknown": 0,
+        "van": 0
+      }
+    },
+    "excluded_unclear": 14,
+    "unmatched_tracks": 17,
+    "threshold_sweep": [
+      {
+        "min_prob": 0.05,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.1,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.15,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.2,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.25,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.3,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.35,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.4,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.45,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.5,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.55,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.6,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.65,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.7,
+        "coverage": 0.9,
+        "selective_precision": 0.3333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.75,
+        "coverage": 0.85,
+        "selective_precision": 0.2941,
+        "answered": 17
+      },
+      {
+        "min_prob": 0.8,
+        "coverage": 0.75,
+        "selective_precision": 0.2667,
+        "answered": 15
+      },
+      {
+        "min_prob": 0.85,
+        "coverage": 0.7,
+        "selective_precision": 0.2857,
+        "answered": 14
+      },
+      {
+        "min_prob": 0.9,
+        "coverage": 0.6,
+        "selective_precision": 0.1667,
+        "answered": 12
+      },
+      {
+        "min_prob": 0.95,
+        "coverage": 0.55,
+        "selective_precision": 0.1818,
+        "answered": 11
+      }
+    ],
+    "by_video": {
+      "offline": {
+        "n": 20,
+        "coverage": 0.9,
+        "selective_precision": 0.5,
+        "correct": 9,
+        "answered": 18
+      }
+    }
+  },
+  "vehicle_color": {
+    "supported_classes": {
+      "n": 27,
+      "coverage": 0.7778,
+      "selective_precision": 0.8095,
+      "correct": 17,
+      "answered": 21
+    },
+    "unsupported_classes": {
+      "n": 1,
+      "correct_abstention_rate": 0.0,
+      "false_attributions": 1,
+      "false_attribution_examples": [
+        {
+          "truth": "silver",
+          "predicted": "red"
+        }
+      ]
+    },
+    "per_class": {
+      "black": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 0
+      },
+      "blue": {
+        "precision": 1.0,
+        "recall": 0.875,
+        "f1": 0.9333,
+        "support": 8
+      },
+      "green": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 1
+      },
+      "red": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 0
+      },
+      "white": {
+        "precision": 1.0,
+        "recall": 0.5333,
+        "f1": 0.6957,
+        "support": 15
+      },
+      "yellow": {
+        "precision": 1.0,
+        "recall": 0.6667,
+        "f1": 0.8,
+        "support": 3
+      }
+    },
+    "macro_f1": 0.6072,
+    "confusion": {
+      "black": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 0,
+        "white": 0,
+        "yellow": 0
+      },
+      "blue": {
+        "black": 0,
+        "blue": 7,
+        "green": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 1,
+        "white": 0,
+        "yellow": 0
+      },
+      "green": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 1,
+        "white": 0,
+        "yellow": 0
+      },
+      "red": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 0,
+        "white": 0,
+        "yellow": 0
+      },
+      "silver": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "red": 1,
+        "silver": 0,
+        "unknown": 0,
+        "white": 0,
+        "yellow": 0
+      },
+      "unknown": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 0,
+        "white": 0,
+        "yellow": 0
+      },
+      "white": {
+        "black": 1,
+        "blue": 0,
+        "green": 0,
+        "red": 3,
+        "silver": 0,
+        "unknown": 3,
+        "white": 8,
+        "yellow": 0
+      },
+      "yellow": {
+        "black": 0,
+        "blue": 0,
+        "green": 0,
+        "red": 0,
+        "silver": 0,
+        "unknown": 1,
+        "white": 0,
+        "yellow": 2
+      }
+    },
+    "excluded_unclear": 14,
+    "unmatched_tracks": 17,
+    "threshold_sweep": [
+      {
+        "min_prob": 0.05,
+        "coverage": 0.8889,
+        "selective_precision": 0.75,
+        "answered": 24
+      },
+      {
+        "min_prob": 0.1,
+        "coverage": 0.8889,
+        "selective_precision": 0.75,
+        "answered": 24
+      },
+      {
+        "min_prob": 0.15,
+        "coverage": 0.8889,
+        "selective_precision": 0.75,
+        "answered": 24
+      },
+      {
+        "min_prob": 0.2,
+        "coverage": 0.8889,
+        "selective_precision": 0.75,
+        "answered": 24
+      },
+      {
+        "min_prob": 0.25,
+        "coverage": 0.8889,
+        "selective_precision": 0.75,
+        "answered": 24
+      },
+      {
+        "min_prob": 0.3,
+        "coverage": 0.8889,
+        "selective_precision": 0.75,
+        "answered": 24
+      },
+      {
+        "min_prob": 0.35,
+        "coverage": 0.8889,
+        "selective_precision": 0.75,
+        "answered": 24
+      },
+      {
+        "min_prob": 0.4,
+        "coverage": 0.8889,
+        "selective_precision": 0.75,
+        "answered": 24
+      },
+      {
+        "min_prob": 0.45,
+        "coverage": 0.8519,
+        "selective_precision": 0.7826,
+        "answered": 23
+      },
+      {
+        "min_prob": 0.5,
+        "coverage": 0.8148,
+        "selective_precision": 0.7727,
+        "answered": 22
+      },
+      {
+        "min_prob": 0.55,
+        "coverage": 0.7778,
+        "selective_precision": 0.8095,
+        "answered": 21
+      },
+      {
+        "min_prob": 0.6,
+        "coverage": 0.7407,
+        "selective_precision": 0.8,
+        "answered": 20
+      },
+      {
+        "min_prob": 0.65,
+        "coverage": 0.6667,
+        "selective_precision": 0.8333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.7,
+        "coverage": 0.6667,
+        "selective_precision": 0.8333,
+        "answered": 18
+      },
+      {
+        "min_prob": 0.75,
+        "coverage": 0.5926,
+        "selective_precision": 0.8125,
+        "answered": 16
+      },
+      {
+        "min_prob": 0.8,
+        "coverage": 0.5926,
+        "selective_precision": 0.8125,
+        "answered": 16
+      },
+      {
+        "min_prob": 0.85,
+        "coverage": 0.5556,
+        "selective_precision": 0.8,
+        "answered": 15
+      },
+      {
+        "min_prob": 0.9,
+        "coverage": 0.4074,
+        "selective_precision": 0.8182,
+        "answered": 11
+      },
+      {
+        "min_prob": 0.95,
+        "coverage": 0.2593,
+        "selective_precision": 0.7143,
+        "answered": 7
+      }
+    ],
+    "by_video": {
+      "offline": {
+        "n": 27,
+        "coverage": 0.7778,
+        "selective_precision": 0.8095,
+        "correct": 17,
+        "answered": 21
+      }
+    }
+  }
+}

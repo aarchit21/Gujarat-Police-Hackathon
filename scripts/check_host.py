@@ -53,6 +53,39 @@ def main() -> None:
         print("yolo_detector", yolo_status())
     except Exception as exc:
         print("yolo_detector FAIL", exc)
+    print("--- deterministic vehicle attributes ---")
+    try:
+        import torch
+
+        cuda = torch.cuda.is_available()
+        print("torch", torch.__version__, "built_cuda", torch.version.cuda, "cuda_available", cuda)
+        if not cuda:
+            # The exact failure this host hit: torch cu130 against a 12.2 driver.
+            print("  FP16/CUDA unavailable -> detector will run on CPU. Check that the "
+                  "torch CUDA build matches the installed driver (nvidia-smi).")
+        else:
+            print("  gpu", torch.cuda.get_device_name(0),
+                  f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    except Exception as exc:
+        print("torch FAIL", exc)
+    try:
+        from app.services.vehicle_attributes import attributes_status
+
+        status = attributes_status()
+        print("vehicle_attributes", json.dumps(status, indent=2))
+        if not status["weights_present"]:
+            print("  run: python scripts/pull_vehicle_attributes.py")
+        if not status["runtime_available"]:
+            print("  run: pip install openvino")
+    except Exception as exc:
+        print("vehicle_attributes FAIL", exc)
+    try:
+        from app.services.vehicle_tracking import bytetrack_available
+
+        ok, why = bytetrack_available()
+        print("bytetrack", "available" if ok else f"UNAVAILABLE ({why}) -> weaker greedy-IoU fallback; pip install lap")
+    except Exception as exc:
+        print("bytetrack FAIL", exc)
     print("max_concurrent_captures", settings.max_open_captures)
     net = host_network_report(include_rtsp_probe=False)
     print("network")

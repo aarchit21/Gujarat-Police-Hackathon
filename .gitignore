@@ -1,12 +1,69 @@
+# --- Python ----------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- secrets ---------------------------------------------------------------
+# .env holds ADMIN_TOKEN and the government-feed credentials. NEVER commit it.
+# .env.example is committed and documents every variable.
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- generated runtime data ------------------------------------------------
+# The database, evidence crops and sampled frames are produced by running the
+# platform. They contain vehicle imagery and are not source.
 data/cctv.db
+data/cctv.db-journal
+data/cctv.db-wal
+data/cctv.db-shm
 data/evidence/
 data/frames/
+data/runs/
+data/samples/
+
+# Model weights are downloaded by scripts/pull_*.py, not committed.
 data/models/
+*.pt
+*.onnx
+*.bin
+*.xml.bin
+# Exception: the 6.3 MB YOLOv8n detector is already in git history and is kept
+# deliberately, so a fresh clone runs without a download. Ultralytics is
+# AGPL-3.0 — see the licence note in README.md before deploying.
+!yolov8n.pt
+
+# Labelling and evaluation output. The FROZEN evaluation evidence in
+# docs/poc_evaluation/ IS committed — it is the basis of the accuracy claims.
+data/labels/*.jpg
+data/labels/reviews_export.jsonl
+
+# --- submission artefacts --------------------------------------------------
+# The built .pptx/.docx and the diagrams are committed so the submission is
+# self-contained. Only the intermediate render cache is ignored.
+final_report/
+
+# --- editors / OS ----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- scratch ---------------------------------------------------------------
 docs/_unpacked_plan/
 docs/_slide_preview/
 docs/_pdf_preview/
-.pytest_cache/
 readme1.md
+nohup.out
+*.log
