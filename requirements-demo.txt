@@ -1,0 +1,33 @@
+# Dependencies for the hosted demonstration instance ONLY.
+#
+# The demo serves a pre-built database and pre-rendered evidence. It runs no
+# detection, no tracking, no attribute classification and no OCR, so it needs
+# none of the machine-learning stack: ultralytics, torch, openvino, lap,
+# onnxruntime and pytesseract are all imported lazily inside the functions that
+# use them (app/services/yolo_detect.py:74,108, vehicle_attributes.py:162,
+# vehicle_tracking.py:34,38, cpu_anpr.py:199,480), never at module import.
+#
+#   ~180 MB installed, against ~2.8 GB for requirements.txt.
+#
+# That difference is what lets this fit a free tier, and it has a second effect
+# worth stating: `ultralytics` is AGPL-3.0, and §13 obliges a network service to
+# offer its complete corresponding source to remote users. Not shipping it means
+# the clause does not attach to the hosted instance at all.
+#
+# `attributes_status()` is documented "never raises" and reports
+# weights_present: false, so the attribute panel degrades to a truthful message
+# rather than an error.
+#
+# Use requirements.txt for anything that actually processes video.
+
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.0
+pydantic-settings>=2.0
+httpx>=0.27
+sqlalchemy>=2.0
+
+# Imported at module load by app/services/{anpr,cpu_anpr,evidence}.py, so these
+# two are not optional even though nothing decodes video here.
+numpy>=2.0
+opencv-python-headless>=4.10

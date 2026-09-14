@@ -24,7 +24,7 @@ from app.services.vehicle_observations import (
     search_observations,
     upsert_observation,
 )
-from tests.conftest import add_camera
+from tests.conftest import add_camera, operator_headers
 
 MODEL_SOURCE = "openvino:vehicle-attributes-recognition-barrier-0042"
 
@@ -143,7 +143,7 @@ def _client(engine):
             session.close()
 
     app.dependency_overrides[get_db] = override
-    return TestClient(app), Session
+    return TestClient(app, headers=operator_headers()), Session
 
 
 def test_label_queue_route_is_developer_only_and_skips_the_frozen_eval_set():

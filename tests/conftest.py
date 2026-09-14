@@ -11,6 +11,18 @@ from app.services.anpr import PlateRead
 from app.services.plates import normalize
 
 
+def operator_headers() -> dict[str, str]:
+    """Credentials for a TestClient.
+
+    Every route except the sign-in page, /healthz and /api/ui/config now sits
+    behind `operator_boundary` in app/main.py. Tests that drive the API have to
+    present a token like any other caller -- an unauthenticated 200 is precisely
+    what that middleware exists to prevent, so it must not be reachable from the
+    suite either.
+    """
+    return {"Authorization": f"Bearer {settings.admin_token}"}
+
+
 @pytest.fixture(autouse=True)
 def disable_external_cloud_queue(monkeypatch):
     """Unit tests never start a real background Ollama request."""

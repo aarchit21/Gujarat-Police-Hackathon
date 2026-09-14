@@ -163,9 +163,86 @@ async def lifespan(_app: FastAPI):
     manager.stop_all()
 
 
-app = FastAPI(title=settings.app_name, version="0.2.0", lifespan=lifespan)
+app = FastAPI(
+    title=settings.app_name,
+    version="0.2.0",
+    lifespan=lifespan,
+    # The interactive docs enumerate every route, its parameters and its response
+    # shape. That is a useful map for an operator and an equally useful one for
+    # anyone else, so it is served only where /dev is.
+    docs_url=None if settings.is_production() else "/docs",
+    redoc_url=None if settings.is_production() else "/redoc",
+    openapi_url=None if settings.is_production() else "/openapi.json",
+)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 init_db()
+
+
+# ---------------------------------------------------------------------------
+# Authentication boundary.
+#
+# Read routes used to answer anonymously -- 26 of them, including vehicle
+# search, plate history, alerts, the watchlist, the camera inventory with its
+# coordinates, and the audit log. The sign-in screen was a client-side overlay
+# (app.js hides a div); the server never knew a session existed. Anyone who
+# could reach the port could read the whole corpus with curl.
+#
+# This is enforced here rather than as `Depends(require_operator)` on each route
+# for one reason: a route added later inherits the deny, instead of shipping
+# public because someone forgot a decorator. The per-route dependencies stay
+# where they are -- they still supply the `actor` value for audit rows, and a
+# second check costs nothing.
+#
+# Everything on this list has to work BEFORE anyone can sign in. Nothing else
+# belongs on it.
+# ---------------------------------------------------------------------------
+PUBLIC_PATHS = frozenset({
+    "/",           # serves the sign-in page itself
+    "/healthz",    # platform liveness probe; says nothing but "ok"
+    "/favicon.ico",
+    "/api/ui/config",  # the page reads app_env before a token exists
+    # Not public: carries its own credential. `require_vendor` checks a separate
+    # token (`vendor_ingest_token`), so the operator check here would reject a
+    # correctly-authenticated vendor. It is exempt from THIS gate, not from auth.
+    "/api/vendor/events",
+})
+PUBLIC_PREFIXES = (
+    "/static/",  # the CSS and JS for the sign-in page
+    "/dev",      # already gated by require_developer_ui, which 404s in production
+    "/docs",     # only mounted outside production (see the constructor above)
+    "/redoc",
+    "/openapi.json",
+)
+
+
+def _is_public(path: str) -> bool:
+    return path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES)
+
+
+@app.middleware("http")
+async def operator_boundary(request: Request, call_next):
+    if request.method == "OPTIONS" or _is_public(request.url.path):
+        return await call_next(request)
+    try:
+        require_operator(
+            authorization=request.headers.get("authorization"),
+            x_operator_token=request.headers.get("x-operator-token"),
+            token=request.query_params.get("token"),
+        )
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness only.
+
+    `/api/health` reports model names, database type, the catalogue host and
+    whether a CCTV token is configured. A hosting platform's health check needs
+    none of that, and on a public host it should not be able to read it.
+    """
+    return {"ok": True}
 
 
 @app.exception_handler(Exception)
@@ -334,6 +411,7 @@ def ui_config():
         "developer_ui_requested": bool(settings.enable_developer_ui),
         "automatic_type_available": bool(gate_passed),
         "color_available": bool(settings.vattr_color_enabled),
+        "demo_instance": bool(settings.demo_instance),
     }
 
 

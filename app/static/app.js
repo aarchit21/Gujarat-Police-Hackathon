@@ -1672,6 +1672,9 @@ async function startSession() {
     // link stays hidden AND the route 404s, so this is a convenience, not the
     // thing keeping the developer console out of reach.
     el("devConsoleLink").classList.toggle("hidden", !config.developer_ui);
+    // Only the server decides this. A reviewer on the hosted instance is told
+    // the footage is generated rather than being left to infer it.
+    el("demoBanner").classList.toggle("hidden", !config.demo_instance);
   } catch (_error) {
     /* the banner covers a backend that is down */
   }

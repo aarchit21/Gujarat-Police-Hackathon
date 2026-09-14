@@ -32,6 +32,15 @@ data/frames/
 data/runs/
 data/samples/
 
+# data/demo/ is DELIBERATELY NOT IGNORED. It is the synthetic dataset for the
+# hosted demonstration instance, built by scripts/build_demo_dataset.py: 2
+# generated cameras, 250 generated observations, ~13 MB of drawn images and no
+# government imagery whatsoever. The Dockerfile COPYs it, and Render builds from
+# the repository, so it has to be committed for the hosted demo to build.
+#
+# If you ever broaden the rules above to a blanket `data/`, re-admit this
+# directory explicitly or the deploy breaks with a confusing COPY failure.
+
 # Model weights are downloaded by scripts/pull_*.py, not committed.
 data/models/
 *.pt

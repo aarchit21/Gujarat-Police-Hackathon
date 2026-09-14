@@ -13,7 +13,7 @@ from app.services.recognition_policy import effective, hydrate, set_camera_mode,
 from app.services.track_aggregate import AggregatedAttributes
 from app.services.vehicle_observations import apply_attributes, search_observations, upsert_observation
 from app.services.yolo_detect import VehicleDet
-from tests.conftest import add_camera
+from tests.conftest import add_camera, operator_headers
 
 
 def _aggregated(*, vehicle_type: str, vehicle_color: str) -> AggregatedAttributes:
@@ -38,7 +38,7 @@ def _client(engine):
             db.close()
 
     app.dependency_overrides[get_db] = override
-    return TestClient(app), Session
+    return TestClient(app, headers=operator_headers()), Session
 
 
 def test_vehicle_observation_upserts_one_track_and_searches_exact_attributes(db):

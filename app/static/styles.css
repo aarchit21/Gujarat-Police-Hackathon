@@ -197,6 +197,14 @@ em { font-style:normal; font-weight:600; color:var(--ink); }
   border-bottom:1px solid transparent;
 }
 .banner-error { background:var(--bad-bg); color:var(--bad); border-bottom-color:var(--bad-line); }
+/* Informational, not an error: the hosted demo is working correctly, it just
+   needs to say what it is. Normal weight so the sentence reads rather than
+   shouts -- only the lead-in is bold. */
+.banner-info {
+  background:var(--warn-bg, #FDF3DF); color:var(--warn, #8A6100);
+  border-bottom-color:var(--warn-line, #E3C888); font-weight:400;
+}
+.banner-info strong { font-weight:700; }
 
 .notice {
   display:flex; gap:var(--s3); align-items:flex-start;

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.database import get_db, init_db, make_engine, make_session_factory
 from app.main import app
+from tests.conftest import operator_headers
 from app.models import Alert, Camera, Sighting, WatchlistEntry
 from app.services.plates import normalize
 
@@ -27,7 +28,7 @@ def _client():
             db.close()
 
     app.dependency_overrides[get_db] = override
-    return TestClient(app), Session
+    return TestClient(app, headers=operator_headers()), Session
 
 
 # --- manual onboarding ----------------------------------------------------

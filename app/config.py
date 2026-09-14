@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # expose the console by setting one variable alone.
     app_env: str = "production"
     enable_developer_ui: bool = False
+    # Set on the publicly hosted instance. It changes nothing about behaviour --
+    # it makes the console say what it is, so a reviewer looking at generated
+    # footage is told so rather than left to work it out. The nav rail already
+    # promises "full video stays in departmental stores"; on a public URL that
+    # sentence needs the accompanying one.
+    demo_instance: bool = False
 
     def is_production(self) -> bool:
         return (self.app_env or "production").strip().lower() in {"production", "prod"}
@@ -43,7 +49,12 @@ class Settings(BaseSettings):
     tesseract_cmd: str = ""
     admin_token: str = "p0-operator"
     vendor_ingest_token: str = "p0-vendor"
-    require_auth: bool = True
+    # `require_auth` used to live here. It made `require_operator` accept a
+    # request carrying NO token at all, which turned every operator route
+    # anonymous from one environment variable. A switch whose only function is to
+    # disable authentication is not worth the convenience it buys, so it is gone
+    # rather than merely defaulted safe. Unknown keys in .env are ignored
+    # (`extra="ignore"`), so an existing REQUIRE_AUTH line is harmless.
 
     # Hypothesis default only. Per-camera target_analysis_fps overrides. Do not treat as measured capacity.
     analysis_fps: float = 2.0

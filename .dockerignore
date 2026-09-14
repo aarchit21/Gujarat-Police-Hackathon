@@ -1,0 +1,34 @@
+# Deny everything, then re-admit what the demo image needs.
+#
+# This direction is deliberate. An allowlist that starts from "nothing" cannot
+# leak a directory someone adds later; a denylist can, and the thing it would
+# leak here is 665 MB of real Gujarat CCTV imagery with camera site names burned
+# into the pixels. The Dockerfile's COPY lines are the actual selection -- this
+# file makes a mistake in them fail rather than quietly ship.
+*
+
+# --- application source ----------------------------------------------------
+!app/
+app/devui/
+# The developer console is unreachable in production (require_developer_ui
+# returns 404), but there is no reason for its source to be in the image.
+
+!scripts/__init__.py
+!requirements-demo.txt
+
+# --- the synthetic dataset, and only the synthetic dataset -----------------
+!data/demo/
+
+# Everything below is excluded by the `*` above and listed only so the reasons
+# are on the record, not because the rule needs restating:
+#
+#   .env                  government portal credentials (CCTV_ACCESS_TOKEN)
+#   data/cctv.db          32 real RTSP endpoints, 5,279 real observations
+#   data/evidence/        24,071 real crops, bystanders, burned-in site names
+#   data/samples/         28 MB of raw government CCTV video
+#   data/frames/          includes 7 real live-preview grabs
+#   data/runs/            788 real evaluation crops
+#   data/models/          OpenVINO weights; the demo runs no inference
+#   final_report/         screenshots and demo video embed real imagery
+#   yolov8n.pt            AGPL-3.0 weights; nothing in the demo detects anything
+#   .git/                 full history

@@ -526,21 +526,46 @@ Two other credentials exist and are separate:
 
 Honest, because a P0 auth model should not be mistaken for a production one:
 
-* **Read endpoints are open.** `GET /api/cameras`, `/api/alerts`,
-  `/api/investigations/vehicles`, `/api/ui/overview` and the rest of the list
-  above answer without a token. The production payloads carry no stream URIs,
-  no credentials and no model identifiers, but anyone who can reach the port
-  can read the observation list. Put the service behind a network boundary or
-  an SSH tunnel — do not expose `0.0.0.0` to an untrusted network.
 * **One shared token, so there is no per-person identity.** Every audit entry
   and every `verified_by` records the actor as `operator`. "Who confirmed this
   colour" is answerable only down to "someone holding the operator token".
   Real accounts are out of P0 scope.
-* **`REQUIRE_AUTH=false` weakens it in a specific way**: a request with *no*
-  token is accepted, while a request with a *wrong* token is still rejected.
-  Leave it `true`.
 * There is no expiry, rotation or revocation. Changing `ADMIN_TOKEN` and
   restarting is the whole rotation procedure.
+* **The token travels on every request.** There is no session and no cookie, so
+  a token that leaks stays valid until it is changed.
+
+### The boundary itself
+
+Every route is closed unless it is on an explicit allowlist in
+[`app/main.py`](app/main.py) — `/`, `/healthz`, `/api/ui/config`, `/static/*`,
+and the developer routes (which `require_developer_ui` already 404s in
+production). Everything else answers `401` without a valid token, enforced by
+one middleware rather than a decorator per route, so a route added later
+inherits the deny instead of shipping open because someone forgot.
+
+`tests/test_auth_surface.py` walks the live routing table and fails if any route
+is neither allowlisted nor `401`.
+
+> **This changed.** Read endpoints used to be open: `GET /api/cameras`,
+> `/api/alerts`, `/api/investigations/vehicles`, `/api/ui/overview`,
+> `/api/vehicles/{plate}`, `/api/audit` and 20 more answered without a token,
+> while the UI showed a sign-in screen that was only a client-side overlay.
+> Anyone who could reach the port could read the whole observation corpus. If
+> you are running an older checkout, that is still true of it.
+
+`?token=` is accepted **only** while the developer console is being served. The
+developer console needs it — `<img src>`, `<a download>` and `window.open`
+cannot carry a header — but a credential in a query string lands in browser
+history, proxy logs and `Referer`, so production refuses it. The production
+console never used it: it fetches evidence with the header and renders from a
+blob URL.
+
+`REQUIRE_AUTH` **is gone.** It made a request carrying *no* token succeed, which
+turned every operator route anonymous from a single environment variable. A
+switch whose only function is to disable authentication is not worth the
+convenience, so it was removed rather than defaulted safe. An existing
+`REQUIRE_AUTH=` line in `.env` is ignored.
 
 ## Architecture
 

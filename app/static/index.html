@@ -115,6 +115,16 @@
       </div>
     </header>
 
+    <!-- Shown only when the server reports demo_instance. On the hosted
+         instance the footage is generated, and a reviewer is told that here
+         rather than being left to infer it from the TEST FEED tags. -->
+    <div class="banner banner-info hidden" id="demoBanner" role="status">
+      <strong>Demonstration instance.</strong>
+      Synthetic camera feed only &mdash; every vehicle and number plate on this
+      site is generated. The operational deployment runs on department hardware,
+      and no footage from the live government cameras is held on this host.
+    </div>
+
     <div class="banner banner-error hidden" id="connectionBanner" role="alert"></div>
 
     <main class="content" id="content">

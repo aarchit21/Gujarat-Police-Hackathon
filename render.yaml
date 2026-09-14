@@ -1,0 +1,74 @@
+# Render blueprint for the hosted demonstration instance.
+#
+# Uses Render's NATIVE PYTHON runtime, not Docker: nothing is built locally, and
+# no Docker installation is needed anywhere. Render clones the repository, runs
+# the build command and starts the process.
+#
+# The Dockerfile in this repository still works and Render can build it remotely
+# (Runtime: Docker) if you ever prefer it -- the one thing it buys is an explicit
+# `apt-get install libglib2.0-0` for opencv-python-headless. Use it if a native
+# build ever fails on a missing shared library.
+#
+# Deploy:
+#   1. python scripts/build_demo_dataset.py     (needs Pillow; run before pushing)
+#   2. commit data/demo/ -- Render builds from the repository
+#   3. Render -> New -> Blueprint -> point at this repo
+#   4. set ADMIN_TOKEN when prompted (it is marked sync:false below)
+#
+# Verify the live URL with the commands in final_report/HOSTED_DEMO.md.
+services:
+  - type: web
+    name: gujarat-police-console-demo
+    runtime: python
+    plan: free
+    region: singapore # closest to the reviewers
+    buildCommand: pip install -r requirements-demo.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+    # /api/health needs a token and reports model names, database type and the
+    # catalogue host. /healthz answers {"ok": true} and nothing else.
+    healthCheckPath: /healthz
+
+    envVars:
+      # Prompted for at deploy time and never stored in the repository.
+      #
+      # Generate with:  python -c "import secrets;print(secrets.token_urlsafe(24))"
+      #
+      # Do NOT use `p0-operator`. It is the default in app/config.py and is
+      # printed three times in README.md, which on a public URL makes the token
+      # equivalent to having read the README.
+      - key: ADMIN_TOKEN
+        sync: false
+
+      # The synthetic dataset built by scripts/build_demo_dataset.py. Relative
+      # paths resolve against the repository root, which is Render's working
+      # directory. Verified: the app boots, serves observations and returns
+      # evidence crops with these exact values.
+      - key: DATABASE_URL
+        value: sqlite:///data/demo/cctv.db
+      - key: EVIDENCE_DIR
+        value: data/demo/evidence
+
+      # Serves the "Demonstration instance / synthetic camera feed only" banner.
+      - key: DEMO_INSTANCE
+        value: "true"
+
+      # /dev returns 404. developer_ui_enabled() requires BOTH a non-production
+      # app_env and the flag, so neither variable alone can open the console.
+      - key: APP_ENV
+        value: production
+      - key: ENABLE_DEVELOPER_UI
+        value: "false"
+
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+      # Deliberately absent, and they must stay absent:
+      #
+      #   CCTV_ACCESS_USERNAME / CCTV_ACCESS_TOKEN
+      #       the government portal credentials. They are injected into RTSP and
+      #       WHEP URLs at stream-open time, so they are functionally the keys to
+      #       the live camera network. The demo opens no streams.
+      #   MAPBOX_ACCESS_TOKEN      billable third-party key; the map uses OSM tiles
+      #   OLLAMA_*                 would make "no external AI service is called" false
+      #   DEMO_AUTOSTART_WORKERS   would try to open camera streams at boot
