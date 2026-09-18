@@ -167,10 +167,14 @@ class VehicleObservation(Base):
     detector_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     vehicle_type: Mapped[str] = mapped_column(String(32), default="unknown", index=True)
     type_confidence: Mapped[float] = mapped_column(Float, default=0.0)
-    type_source: Mapped[str] = mapped_column(String(48), default="local")
+    # 96, not 48: these hold a model identifier, and the shipped attribute model
+    # writes "openvino:vehicle-attributes-recognition-barrier-0042" (52 chars).
+    # SQLite does not enforce declared widths, so the overflow was invisible
+    # until the PostgreSQL migration rejected it.
+    type_source: Mapped[str] = mapped_column(String(96), default="local")
     vehicle_color: Mapped[str] = mapped_column(String(32), default="unknown", index=True)
     color_confidence: Mapped[float] = mapped_column(Float, default=0.0)
-    color_source: Mapped[str] = mapped_column(String(48), default="local")
+    color_source: Mapped[str] = mapped_column(String(96), default="local")
     # Human verification. These never overwrite the raw model output, which
     # stays in metadata_json["attributes"] for diagnostics; the operational
     # vehicle_type / vehicle_color columns above are derived from them.

@@ -41,8 +41,13 @@ class Settings(BaseSettings):
         return bool(self.enable_developer_ui) and not self.is_production()
 
     database_url: str = f"sqlite:///{(ROOT / 'data' / 'cctv.db').as_posix()}"
-    db_pool_size: int = 5
-    db_max_overflow: int = 10
+    # 0 means "size the pool from the worker count" -- see effective_db_pool_size().
+    # Every camera worker thread holds its own Session for the life of the run, so
+    # a pool smaller than the worker count makes workers block on each other
+    # rather than on the cameras.
+    db_pool_size: int = 0
+    db_max_overflow: int = 0
+    db_busy_timeout_ms: int = 10_000  # SQLite fallback only.
 
     evidence_dir: Path = ROOT / "data" / "evidence"
     frames_dir: Path = ROOT / "data" / "frames"
@@ -275,12 +280,17 @@ class Settings(BaseSettings):
     vendor_max_payload_bytes: int = 64_000
     max_upload_bytes: int = 8_000_000
 
+    # Concurrent live camera workers. Raised from 4 to cover a whole catalogue at
+    # once: the old value was chosen because SQLite's write lock could not survive
+    # more, not because the host could not decode more. Decoding is the real
+    # ceiling now -- each RTSP worker decodes every frame even though analytics
+    # samples a subset -- so measure on the host before raising further.
     max_concurrent_workers: int = Field(
-        default=4,
+        default=32,
         validation_alias=AliasChoices("MAX_CONCURRENT_WORKERS", "max_concurrent_workers"),
     )
     max_open_captures: int = Field(
-        default=4,
+        default=32,
         validation_alias=AliasChoices("MAX_CONCURRENT_CAPTURES", "MAX_OPEN_CAPTURES", "max_open_captures"),
     )
     reconnect_start_seconds: float = Field(
@@ -312,6 +322,23 @@ class Settings(BaseSettings):
         if not parsed.scheme or not parsed.netloc:
             return ""
         return f"{parsed.scheme}://{parsed.netloc}"
+
+    def effective_db_pool_size(self) -> int:
+        """Enough pooled connections for every worker plus API traffic.
+
+        Each live camera worker holds one Session for the duration of its run.
+        With the old fixed pool of 5 (+10 overflow), raising the worker count
+        would have made workers queue for connections instead of reading frames.
+        An explicit DB_POOL_SIZE still wins.
+        """
+        if self.db_pool_size and self.db_pool_size > 0:
+            return int(self.db_pool_size)
+        return max(10, int(self.max_concurrent_workers) + 12)
+
+    def effective_db_max_overflow(self) -> int:
+        if self.db_max_overflow and self.db_max_overflow > 0:
+            return int(self.db_max_overflow)
+        return max(10, int(self.max_concurrent_workers) // 2)
 
     def database_kind(self) -> str:
         scheme = (urlparse(self.database_url).scheme or "").lower()

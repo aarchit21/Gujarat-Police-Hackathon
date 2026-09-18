@@ -588,17 +588,45 @@ A GPU is **not** required in every district. This host does **not** pull 80,000 
 
 PostgreSQL with PostGIS is the production and scale target. SQLite is an explicit **local-development and automated-test fallback**. It is not the statewide database.
 
-Configure with `DATABASE_URL`. Docker is **not** required.
+Configure with `DATABASE_URL`. Docker is **not** required, and neither is root.
 
-Native PostgreSQL example (install PostgreSQL + PostGIS on the host, create a database, then):
+### Why this matters for camera count
 
-```powershell
-$env:DATABASE_URL = "postgresql+psycopg://USER:PASSWORD@127.0.0.1:5432/cctv"
-$env:DB_POOL_SIZE = "5"
-$env:DB_MAX_OVERFLOW = "10"
+SQLite takes a **whole-file write lock**. That is why the worker cap was 4: the
+recorded four-camera run still logged 34 `database is locked` failures. Measured
+on this host with 32 threads writing the same pattern a camera worker writes:
+
+| Database | Succeeded | Failed |
+|---|---|---|
+| SQLite, original settings | 25 / 800 | **775 `database is locked`** |
+| SQLite, with WAL + busy timeout (current fallback) | 800 / 800 | 0 |
+| PostgreSQL 18 | 800 / 800 | 0 |
+
+Reproduce with `python scripts/verify_concurrency.py --workers 32`.
+
+### Setup (user-space PostgreSQL, no root)
+
+PostgreSQL lives in its **own** conda environment so the solver can never move the
+pinned torch/opencv/onnxruntime versions in `gujhac`. The data directory sits
+outside the repository.
+
+```bash
+conda create -n pgsrv -c conda-forge -y postgresql
+python scripts/setup_postgres.py --start          # cluster + database, idempotent
+python scripts/migrate_to_postgres.py --target 'postgresql+psycopg://cctv@127.0.0.1:5432/cctv'
 ```
 
-Create the database yourself, for example:
+Put the printed URL in `.env`, then manage the server day to day with:
+
+```bash
+scripts/postgres_ctl.sh start | stop | status | psql | logs
+```
+
+Pool size is derived from `MAX_CONCURRENT_WORKERS` unless `DB_POOL_SIZE` is set —
+every worker holds a session for its whole run, so a pool smaller than the worker
+count makes workers queue on connections instead of reading frames.
+
+If you would rather create the database by hand:
 
 ```sql
 CREATE DATABASE cctv;
@@ -616,6 +644,25 @@ On startup the app:
 Time-based partitioning of `sightings`, replication, backups, and retention are documented in `app/sql/postgres_scale.sql` as production recommendations. They are not auto-applied and have **not** been load-tested at 80,000 cameras.
 
 The health endpoint and UI show the active database type. SQLite is labelled as a dev fallback.
+
+### Measured: all catalogue cameras at once
+
+With PostgreSQL and `MAX_CONCURRENT_WORKERS=32`, starting every camera in the
+catalogue on the RTX A4500 host:
+
+| | Before (SQLite, cap 4) | After |
+|---|---|---|
+| Workers accepted without queuing | 4 | **30 of 30** |
+| Concurrent open captures | 4 | **30** |
+| Cameras decoding | 8 | **23** (`decode_status='ok'`) |
+| Frames in a 2-minute window | — | 8,173 across 16 cameras |
+| New `database is locked` errors | 34 | **0** |
+
+RTSP connections settle gradually — 8 cameras were producing frames at 60 s and
+16 at 120 s, so give a fleet start a couple of minutes before judging it. The
+practical ceiling is now host decode capacity, not the database: each RTSP worker
+decodes every frame even though analytics samples a subset. Raise the cap further
+only against a measurement.
 
 ## All-day demo (vehicle monitoring)
 

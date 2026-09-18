@@ -70,6 +70,12 @@ VEHICLE_OBSERVATION_COLUMNS = {
     "review_status": ("VARCHAR(24) DEFAULT 'unreviewed'", "VARCHAR(24) DEFAULT 'unreviewed'"),
 }
 
+# (table, column, new width). Widening only -- see _widen_columns().
+WIDEN_COLUMNS = (
+    ("vehicle_observations", "type_source", 96),
+    ("vehicle_observations", "color_source", 96),
+)
+
 INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS ix_vehicle_observations_review_status ON vehicle_observations (review_status)",
     "CREATE INDEX IF NOT EXISTS ix_vehicle_observations_verified_type ON vehicle_observations (verified_vehicle_type)",
@@ -232,11 +238,34 @@ def _backfill_vehicle_observations(engine: Engine) -> None:
         return
 
 
+def _widen_columns(engine: Engine) -> list[str]:
+    """Grow columns whose declared width is smaller than what the app writes.
+
+    PostgreSQL enforces VARCHAR length; SQLite does not, so an overflow can sit
+    unnoticed in a SQLite database and only surface on migration. Widening is
+    additive and never truncates. No-op outside PostgreSQL.
+    """
+    if _dialect(engine) != "postgresql":
+        return []
+    widened: list[str] = []
+    for table, column, width in WIDEN_COLUMNS:
+        if column not in _columns(engine, table):
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE VARCHAR({width})"))
+            widened.append(f"{table}.{column}->{width}")
+        except Exception:
+            continue
+    return widened
+
+
 def apply_migrations(engine: Engine) -> dict:
     added = []
     added.extend(_add_columns(engine, "cameras", CAMERA_COLUMNS))
     added.extend(_add_columns(engine, "sightings", SIGHTING_COLUMNS))
     added.extend(_add_columns(engine, "vehicle_observations", VEHICLE_OBSERVATION_COLUMNS))
+    widened = _widen_columns(engine)
     _postgres_vehicle_jsonb(engine)
     _sqlite_empty_vehicle_json(engine)
     _backfill_vehicle_observations(engine)
@@ -249,6 +278,7 @@ def apply_migrations(engine: Engine) -> dict:
     postgis = _try_postgis(engine)
     return {
         "added_columns": added,
+        "widened_columns": widened,
         "postgis": postgis,
         "dialect": _dialect(engine),
         "destroyed_data": False,

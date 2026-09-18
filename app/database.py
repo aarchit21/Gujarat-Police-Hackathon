@@ -85,6 +85,16 @@ def make_engine(url: str | None = None, *, pool_size: int | None = None, max_ove
         def _sqlite_pragma(dbapi_connection, _connection_record):
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            # Concurrency hardening. The default rollback journal takes a whole-file
+            # write lock, which is why four camera workers produced 34
+            # "database is locked" failures in the recorded run. WAL lets readers
+            # run during a write, and busy_timeout makes a writer wait its turn
+            # instead of raising immediately. SQLite remains the dev fallback --
+            # PostgreSQL is the target for many concurrent cameras.
+            if ":memory:" not in target:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute(f"PRAGMA busy_timeout={int(settings.db_busy_timeout_ms)}")
             cursor.close()
 
         return engine
@@ -94,9 +104,10 @@ def make_engine(url: str | None = None, *, pool_size: int | None = None, max_ove
         future=True,
         json_serializer=json.dumps,
         json_deserializer=soft_json_loads,
-        pool_size=pool_size if pool_size is not None else settings.db_pool_size,
-        max_overflow=max_overflow if max_overflow is not None else settings.db_max_overflow,
+        pool_size=pool_size if pool_size is not None else settings.effective_db_pool_size(),
+        max_overflow=max_overflow if max_overflow is not None else settings.effective_db_max_overflow(),
         pool_pre_ping=True,
+        pool_recycle=1800,
     )
 
 
@@ -142,7 +153,11 @@ def database_status() -> dict:
         "dialect": info["dialect"],
         "safe_url": info["safe_url"],
         "postgis": postgis_enabled() if info["is_postgresql"] else False,
-        "pool_size": None if info["is_sqlite"] else settings.db_pool_size,
+        # The effective value, not the raw setting: 0 means "size from the worker
+        # count", so reporting the raw setting would show 0 pooled connections.
+        "pool_size": None if info["is_sqlite"] else settings.effective_db_pool_size(),
+        "max_overflow": None if info["is_sqlite"] else settings.effective_db_max_overflow(),
+        "concurrent_worker_capacity": int(settings.max_concurrent_workers),
         "sqlite_is_dev_fallback": info["is_sqlite"],
         "production_target": "postgresql+postgis",
     }

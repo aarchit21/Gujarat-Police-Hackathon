@@ -24,11 +24,14 @@ from app.services.timing import backoff_seconds
 PRIORITY_RANK = {"A": 0, "B": 1, "C": 2, "D": 3}
 CONCURRENCY_STATE_KEY = "max_concurrent_workers"
 CONCURRENCY_MIN = 1
-CONCURRENCY_MAX = 30
+# Headroom above the current catalogue (30 cameras) so "start every camera" is
+# never silently truncated by this constant. The practical ceiling is host decode
+# capacity, which the capacity estimator measures, not this number.
+CONCURRENCY_MAX = 64
 
 
 def clamp_concurrency(n) -> int:
-    """Operator-chosen live slots. Default 4; never a hardcoded 30-camera lock."""
+    """Operator-chosen live slots. Bounded by CONCURRENCY_MAX, not a camera count."""
     fallback = max(CONCURRENCY_MIN, int(settings.max_concurrent_workers or 4))
     try:
         value = int(n)

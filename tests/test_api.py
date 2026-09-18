@@ -45,8 +45,18 @@ def test_health_exposes_sqlite_fallback_and_coverage():
         db.commit()
         db.close()
         health = client.get("/api/health").json()
-        assert health["database"]["type"] == "sqlite"
-        assert health["database"]["sqlite_is_dev_fallback"] is True
+        # /api/health reports the CONFIGURED database, not this test's in-memory
+        # engine, so it says "postgresql" on a host that has been migrated and
+        # "sqlite" on one still on the fallback. Assert the two fields agree
+        # rather than pinning a dialect -- pinning one made this test fail purely
+        # because the host moved to PostgreSQL for concurrent camera workers.
+        assert health["database"]["type"] in {"sqlite", "postgresql"}
+        assert health["database"]["sqlite_is_dev_fallback"] is (
+            health["database"]["type"] == "sqlite"
+        )
+        if health["database"]["type"] == "postgresql":
+            # Pool must cover every worker slot, or workers queue on connections.
+            assert health["database"]["pool_size"] >= health["database"]["concurrent_worker_capacity"]
         assert health["onboarded_count"] == 1
         assert health["analytics_active_count"] == 0
         assert health["catalogue_live_is_not_analytics_active"] is True
